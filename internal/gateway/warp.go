@@ -318,7 +318,9 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 				break
 			}
 		}
-		if halted || ctx.Err() != nil {
+		// A WARP pool with no exit cannot be fixed by spending the remaining
+		// attempts; return 503 now instead of hanging into the edge timeout.
+		if halted || ctx.Err() != nil || errors.Is(lastErr, errWARPUnavailable) {
 			break
 		}
 		if !leaseBlocked && upstreamStatus(lastResponse) != http.StatusTooManyRequests {

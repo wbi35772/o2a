@@ -57,8 +57,10 @@ const (
 )
 
 // emptyPoolWait bounds how long Acquire blocks on an empty pool. A registration
-// normally finishes well inside this; anything longer means WARP is down.
-const emptyPoolWait = 25 * time.Second
+// normally finishes well inside this; anything longer means WARP is down or the
+// supply is exhausted, so the request fails fast instead of hanging until the
+// edge timeout.
+const emptyPoolWait = 5 * time.Second
 
 // refillRetryDelay spaces out a failed registration attempt. Successful
 // registrations run back to back in the background.
@@ -583,6 +585,12 @@ func (p *Pool) releaseStarvationLocked(keep string) {
 		var oldest time.Time
 		for key, until := range p.cooling {
 			if key == keep || !until.After(now) {
+				continue
+			}
+			// Never release a block that is cooling for a spent free-tier
+			// quota. It has hours left and would only answer 429 again, so
+			// releasing it turns the guard into a registration/429 loop.
+			if until.Sub(now) > maxRateLimitCooldown {
 				continue
 			}
 			if oldestKey == "" || until.Before(oldest) {
