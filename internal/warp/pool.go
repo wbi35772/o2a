@@ -20,7 +20,7 @@ const DefaultPoolSize = 2
 // maxPreload bounds how many exits are registered eagerly at startup. The rest
 // of a larger pool still grows on demand, so a 24-exit ceiling does not hammer
 // the registration API just to sit idle.
-const maxPreload = 8
+const maxPreload = 12
 
 // egressCooldown keeps a public /64 (or IPv4 /32) that the upstream has
 // rejected out of the pool for this long. The free tier scopes its quota to
