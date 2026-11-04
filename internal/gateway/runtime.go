@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -228,7 +230,7 @@ func (m *RuntimeController) selectWARP(cfg config.Config) (*warp.Pool, string, b
 	if !cfg.Warp.Enabled {
 		return nil, "", false, nil
 	}
-	key := fmt.Sprintf("%d|%s|%s", cfg.Warp.PoolSize, cfg.Warp.Stack, cfg.Warp.SourceIPv6)
+	key := fmt.Sprintf("%d|%s|%s|%s", cfg.Warp.PoolSize, cfg.Warp.Stack, cfg.Warp.SourceIPv6, strings.Join(cfg.Warp.RegistrationProxies, ","))
 	if m.warpPool != nil && m.warpKey == key {
 		return m.warpPool, key, false, nil
 	}
@@ -239,6 +241,14 @@ func (m *RuntimeController) selectWARP(cfg config.Config) (*warp.Pool, string, b
 			return nil, "", false, fmt.Errorf("initialize WARP egress: warp.source_ipv6: %w", err)
 		}
 		source = prefix.Masked()
+	}
+	registerProxies := make([]*url.URL, 0, len(cfg.Warp.RegistrationProxies))
+	for _, raw := range cfg.Warp.RegistrationProxies {
+		proxy, err := url.Parse(raw)
+		if err != nil || proxy.Host == "" {
+			return nil, "", false, fmt.Errorf("initialize WARP egress: warp.registration_proxies: %q is not a proxy URL", raw)
+		}
+		registerProxies = append(registerProxies, proxy)
 	}
 	timeout := time.Duration(cfg.Retry.TimeoutSeconds) * time.Second
 	if timeout <= 0 || timeout > 2*time.Minute {
@@ -253,7 +263,7 @@ func (m *RuntimeController) selectWARP(cfg config.Config) (*warp.Pool, string, b
 	}
 	ctx, cancel := context.WithTimeout(m.root, timeout)
 	defer cancel()
-	pool, err := warp.NewWithOptions(ctx, m.logger, warp.Options{Size: cfg.Warp.PoolSize, Stack: warp.Stack(cfg.Warp.Stack), SourceIPv6: source, StatePath: warpStatePath(m.configPath)})
+	pool, err := warp.NewWithOptions(ctx, m.logger, warp.Options{Size: cfg.Warp.PoolSize, Stack: warp.Stack(cfg.Warp.Stack), SourceIPv6: source, StatePath: warpStatePath(m.configPath), RegisterProxies: registerProxies})
 	if err != nil {
 		return nil, "", false, fmt.Errorf("initialize WARP egress: %w", err)
 	}

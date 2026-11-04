@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -17,10 +18,10 @@ import (
 
 const DefaultPoolSize = 2
 
-// maxPreload bounds how many exits are registered eagerly at startup. The rest
-// of a larger pool still grows on demand, so a 24-exit ceiling does not hammer
-// the registration API just to sit idle.
-const maxPreload = 12
+// maxPreload bounds how many exits are registered eagerly at startup. Each
+// exit carries exactly one free request while its /64 is fresh, so an idle pool
+// is inventory, not waste: preload the whole configured pool when possible.
+const maxPreload = 32
 
 // egressCooldown keeps a public /64 (or IPv4 /32) that the upstream has
 // rejected out of the pool for this long. The free tier scopes its quota to
@@ -202,6 +203,10 @@ type Options struct {
 	// restart does not register the same spent /64 again. Empty disables
 	// persistence.
 	StatePath string
+	// RegisterProxies routes device registration through these listeners, one
+	// per registration, so a fresh source address yields a fresh egress /64.
+	// The WireGuard data plane still leaves from this host.
+	RegisterProxies []*url.URL
 }
 
 // NewWithOptions creates a WARP pool whose exits use the selected IP stack and,
@@ -218,7 +223,7 @@ func NewWithOptions(ctx context.Context, log *slog.Logger, opts Options) (*Pool,
 	if size <= 0 {
 		size = DefaultPoolSize
 	}
-	r := newRegistrar()
+	r := newRegistrar(opts.RegisterProxies)
 	pool, err := newPool(ctx, slogLogger{log: log}, size, opts.StatePath, func(ctx context.Context) (*exit, error) {
 		reg, err := r.register(ctx)
 		if err != nil {

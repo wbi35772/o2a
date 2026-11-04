@@ -177,6 +177,17 @@ start_mihomo() {
 write_config() {
     config_path=${CONFIG_PATH:-$state_dir/config.json}
     [ -f "$config_path" ] || return 0
+    # Farm mode (marker file warp-farm.txt): the subscription listeners are
+    # only registration routes, so every new WARP device is minted from a
+    # different source address and gets a fresh egress /64. The data plane
+    # stays on WARP, so proxies and proxyfile stay empty.
+    if [ -f "$state_dir/warp-farm.txt" ]; then
+        jq --rawfile pf "$work_dir/proxies.txt" \
+            '.warp.registration_proxies = ($pf | split("\n") | map(select(length > 0) | split("#")[0]))
+             | .warp.enabled = true | .proxies = [] | .proxyfile = ""' \
+            "$config_path" > "$config_path.tmp" && mv "$config_path.tmp" "$config_path"
+        return 0
+    fi
     jq --arg pf "$work_dir/proxies.txt" \
         '.warp.enabled = false | .proxies = [] | .proxyfile = $pf' \
         "$config_path" > "$config_path.tmp" && mv "$config_path.tmp" "$config_path"

@@ -81,6 +81,12 @@ type WarpConfig struct {
 	// replacement exit a new public egress; without it, exits share one
 	// address and an egress-scoped free quota stays exhausted.
 	SourceIPv6 string `json:"source_ipv6,omitempty"`
+	// RegistrationProxies sends device registration out through these
+	// listeners, one per registration. Cloudflare assigns the tunnel's egress
+	// /64 from the address it sees, so rotating the registration route is the
+	// way to mint fresh egress blocks when the direct route is spent. The
+	// WireGuard data plane still leaves from this host.
+	RegistrationProxies []string `json:"registration_proxies,omitempty"`
 }
 
 // Normalize fills the defaults and canonicalizes the stack name.
@@ -113,6 +119,29 @@ func (w *WarpConfig) Normalize() error {
 		}
 		w.SourceIPv6 = prefix.Masked().String()
 	}
+	normalized := make([]string, 0, len(w.RegistrationProxies))
+	seen := make(map[string]bool, len(w.RegistrationProxies))
+	for _, entry := range w.RegistrationProxies {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		proxy, err := url.Parse(entry)
+		if err != nil || proxy.Host == "" {
+			return fmt.Errorf("warp.registration_proxies: %q is not a proxy URL", entry)
+		}
+		switch strings.ToLower(proxy.Scheme) {
+		case "http", "https", "socks5":
+		default:
+			return fmt.Errorf("warp.registration_proxies: %q uses an unsupported scheme", entry)
+		}
+		if seen[entry] {
+			continue
+		}
+		seen[entry] = true
+		normalized = append(normalized, entry)
+	}
+	w.RegistrationProxies = normalized
 	return nil
 }
 

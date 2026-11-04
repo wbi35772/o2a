@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,10 @@ const (
 	// registrations out. A larger server value is clamped so a bad header
 	// cannot freeze the pool for hours.
 	maxRateLimitPause = 5 * time.Minute
+	// registrationProxyFailurePause parks a registration listener that failed
+	// at the transport level long enough to rotate past it, without dropping it
+	// for the whole run: these listeners are flaky, not dead.
+	registrationProxyFailurePause = 20 * time.Second
 )
 
 // RegistrationWindow is the longest pause Cloudflare's registration rate limit
@@ -81,51 +86,92 @@ type registration struct {
 	Endpoints     []string
 }
 
+// registrar creates WARP devices. Registration is the only step that needs a
+// non-WARP route, so when registerProxies are configured each registration goes
+// out through the next one: Cloudflare answers a registration from a fresh
+// address with a fresh egress /64 instead of re-issuing the direct one, and the
+// per-source registration rate limit does not gate the whole farm. The
+// WireGuard data plane still leaves from this host.
 type registrar struct {
-	base   string
-	client *http.Client
+	base    string
+	direct  *http.Client
+	proxies []*http.Client
 
-	mu          sync.Mutex
-	blockedTill time.Time
+	mu     sync.Mutex
+	next   int
+	paused []time.Time // one per proxy, the direct route last
 }
 
-func newRegistrar() *registrar {
-	return &registrar{
-		base: defaultAPIBase,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				Proxy:               nil,
-				ForceAttemptHTTP2:   false,
-				MaxIdleConns:        4,
-				IdleConnTimeout:     30 * time.Second,
-				TLSHandshakeTimeout: 10 * time.Second,
-			},
-		},
+func newRegistrar(registerProxies []*url.URL) *registrar {
+	newTransport := func() *http.Transport {
+		return &http.Transport{
+			Proxy:               nil,
+			ForceAttemptHTTP2:   false,
+			MaxIdleConns:        4,
+			IdleConnTimeout:     30 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
+		}
 	}
+	r := &registrar{
+		base:   defaultAPIBase,
+		direct: &http.Client{Timeout: 30 * time.Second, Transport: newTransport()},
+	}
+	for _, proxy := range registerProxies {
+		if proxy == nil {
+			continue
+		}
+		transport := newTransport()
+		transport.Proxy = http.ProxyURL(proxy)
+		r.proxies = append(r.proxies, &http.Client{Timeout: 30 * time.Second, Transport: transport})
+	}
+	r.paused = make([]time.Time, len(r.proxies)+1)
+	return r
 }
 
-// blocked reports how much longer Cloudflare's last rate-limit answer keeps
-// new registrations out.
-func (r *registrar) blocked() time.Duration {
+// acquire picks the client for one registration: the next proxy whose last
+// rate-limit window has ended, or the direct route when none is configured. A
+// positive wait means every candidate is still paused and reports the shortest
+// remaining window.
+func (r *registrar) acquire() (int, *http.Client, time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if wait := time.Until(r.blockedTill); wait > 0 {
-		return wait
+	direct := len(r.proxies)
+	now := time.Now()
+	if direct == 0 {
+		if wait := r.paused[direct].Sub(now); wait > 0 {
+			return direct, r.direct, wait
+		}
+		return direct, r.direct, 0
 	}
-	return 0
+	var minWait time.Duration
+	start := r.next % direct
+	for offset := 0; offset < direct; offset++ {
+		index := (start + offset) % direct
+		wait := r.paused[index].Sub(now)
+		if wait <= 0 {
+			r.next = (index + 1) % direct
+			return index, r.proxies[index], 0
+		}
+		if minWait == 0 || wait < minWait {
+			minWait = wait
+		}
+	}
+	return -1, nil, minWait
 }
 
-// pause records Cloudflare's rate-limit window. Existing windows only grow,
-// so overlapping answers cannot shorten one another.
-func (r *registrar) pause(wait time.Duration) {
-	if wait <= 0 {
+// pause records Cloudflare's rate-limit window for one route. Existing windows
+// only grow, so overlapping answers cannot shorten one another.
+func (r *registrar) pause(index int, wait time.Duration) {
+	if index < 0 || wait <= 0 {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if until := time.Now().Add(wait); until.After(r.blockedTill) {
-		r.blockedTill = until
+	if index >= len(r.paused) {
+		return
+	}
+	if until := time.Now().Add(wait); until.After(r.paused[index]) {
+		r.paused[index] = until
 	}
 }
 
@@ -135,7 +181,8 @@ func (r *registrar) pause(wait time.Duration) {
 // recorded here and the caller retries when the window ends, so a rate limit
 // never blocks registration behind a long sleep.
 func (r *registrar) register(ctx context.Context) (registration, error) {
-	if wait := r.blocked(); wait > 0 {
+	index, client, wait := r.acquire()
+	if wait > 0 {
 		return registration{}, &registrationPausedError{retryAfter: wait, reason: "Cloudflare rate limit"}
 	}
 	privateKey, publicKey, err := wireGuardKeypair()
@@ -156,7 +203,7 @@ func (r *registrar) register(ctx context.Context) (registration, error) {
 		return registration{}, err
 	}
 	var created deviceEnvelope
-	if err := r.doJSON(ctx, http.MethodPost, "/reg", payload, "", &created); err != nil {
+	if err := r.doJSON(ctx, index, client, http.MethodPost, "/reg", payload, "", &created); err != nil {
 		return registration{}, fmt.Errorf("create WARP device: %w", err)
 	}
 	if created.Result.ID == "" || created.Result.Token == "" {
@@ -168,11 +215,11 @@ func (r *registrar) register(ctx context.Context) (registration, error) {
 		return registration{}, err
 	}
 	var patched deviceEnvelope
-	if err := r.doJSON(ctx, http.MethodPatch, "/reg/"+created.Result.ID, enabled, created.Result.Token, &patched); err != nil {
+	if err := r.doJSON(ctx, index, client, http.MethodPatch, "/reg/"+created.Result.ID, enabled, created.Result.Token, &patched); err != nil {
 		return registration{}, fmt.Errorf("enable WARP device: %w", err)
 	}
 	var current deviceEnvelope
-	if err := r.doJSON(ctx, http.MethodGet, "/reg/"+created.Result.ID, nil, created.Result.Token, &current); err != nil {
+	if err := r.doJSON(ctx, index, client, http.MethodGet, "/reg/"+created.Result.ID, nil, created.Result.Token, &current); err != nil {
 		return registration{}, fmt.Errorf("read WARP device: %w", err)
 	}
 	if !current.Result.WARPEnabled {
@@ -254,7 +301,7 @@ func uniqueEndpoints(endpoints []string) []string {
 	return result
 }
 
-func (r *registrar) doJSON(ctx context.Context, method, path string, body []byte, token string, target any) error {
+func (r *registrar) doJSON(ctx context.Context, index int, client *http.Client, method, path string, body []byte, token string, target any) error {
 	var lastErr error
 	for attempt := 0; attempt < 4; attempt++ {
 		if attempt > 0 {
@@ -281,10 +328,19 @@ func (r *registrar) doJSON(ctx context.Context, method, path string, body []byte
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
-		resp, err := r.client.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
-			lastErr = err
-			continue
+			if index >= 0 && index < len(r.proxies) {
+				// A registration listener that stops answering must not stop
+				// the farm: skip it for a short window and finish this request
+				// over the direct route.
+				r.pause(index, registrationProxyFailurePause)
+				resp, err = r.direct.Do(req)
+			}
+			if err != nil {
+				lastErr = err
+				continue
+			}
 		}
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
@@ -305,7 +361,7 @@ func (r *registrar) doJSON(ctx context.Context, method, path string, body []byte
 				if pause > maxRateLimitPause {
 					pause = maxRateLimitPause
 				}
-				r.pause(pause)
+				r.pause(index, pause)
 				return &registrationPausedError{retryAfter: pause, reason: bodyText}
 			}
 			lastErr = fmt.Errorf("Cloudflare API HTTP %d: %s", resp.StatusCode, bodyText)
