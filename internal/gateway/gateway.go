@@ -81,7 +81,10 @@ type Gateway struct {
 	// warp, when non-nil, is the shared userspace WARP pool. Free-model
 	// traffic on the anonymous lane and the Zen key tier leaves through it
 	// instead of the configured proxies and transports.
-	warp         *warp.Pool
+	warp *warp.Pool
+	// sessions tracks the free-tier session generation per client
+	// conversation. A spent session gets a new id instead of burning an exit.
+	sessions     *sessionGuard
 	catalog      *models.ModelCatalog
 	monitor      *telemetry.Metrics
 	availability *models.AvailabilityRegistry
@@ -131,6 +134,7 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, war
 		goNodes:        goNodes,
 		anonymous:      anonymousPool(cfg.Anonymous, transports, cooldown, anonymousBackoffFromConfig(cfg.Models.AnonymousBackoff)),
 		warp:           warpPool,
+		sessions:       newSessionGuard(),
 		catalog:        catalog,
 		monitor:        monitor,
 		attemptTimeout: attemptDeadline(cfg),

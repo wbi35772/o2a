@@ -463,6 +463,29 @@ func (p *Pool) ReportWithRetryAfter(lease *Lease, status int, body []byte, retry
 	p.penalize(lease.exit, reason, retryAfter, classifyPenalty(status, body))
 }
 
+// PenalizeEgress retires an exit by its egress key. The anonymous lane uses it
+// for an exit whose first 429 was held while the session identity was
+// validated, and whose rotated session was rejected too.
+func (p *Pool) PenalizeEgress(key string, status int, body []byte, retryAfter time.Duration) bool {
+	if p == nil || key == "" {
+		return false
+	}
+	p.mu.Lock()
+	var target *exit
+	for _, candidate := range p.active {
+		if candidate.egressKey() == key {
+			target = candidate
+			break
+		}
+	}
+	p.mu.Unlock()
+	if target == nil {
+		return false
+	}
+	p.penalize(target, "held 429 after session rotation", retryAfter, classifyPenalty(status, body))
+	return true
+}
+
 // Fail drops an exit that cannot carry traffic even though the upstream never
 // produced an HTTP response, such as a broken WARP handshake or a stalled first
 // token. Retrying the same user-space tunnel would only repeat the stall.
