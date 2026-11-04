@@ -145,7 +145,7 @@ build_fleet() {
     ' "$work_dir/chosen.json" > "$work_dir/mihomo.json"
 
     jq -r '.listeners[] | [.name, .port, .proxy] | @tsv' "$work_dir/mihomo.json" > "$work_dir/ports.tsv"
-    jq -r '.listeners[] | "socks5://127.0.0.1:" + (.port | tostring)' "$work_dir/mihomo.json" > "$work_dir/proxies.txt"
+    jq -r '.listeners[] | "socks5://127.0.0.1:" + (.port | tostring) + "#pool"' "$work_dir/mihomo.json" > "$work_dir/proxies.txt"
     jq -r '.proxies[] | .name' "$work_dir/mihomo.json" > "$selected_file"
 
     jq -r --slurpfile m "$work_dir/mihomo.json" '

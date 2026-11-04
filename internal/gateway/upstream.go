@@ -495,18 +495,19 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			} else if resp.StatusCode == http.StatusTooManyRequests {
 				body := peekResponseBody(resp)
 				if isFreeUsageLimitBody(body) {
-					// The free allowance is metered per egress address for
-					// hours (the header at 2026-11-04 asked for ~16h), and a
-					// fresh conversation session on the same exit answers the
-					// same. Retire the exit for the advertised window and move
-					// on: rotating the session here would only burn
-					// generations without clearing the quota.
-					until := time.Now().Add(g.freeUsageBlockTTL(resp.Header.Get("Retry-After")))
-					node.proxy.markBlocked(until)
+					// The free allowance is metered to the egress IP, not to
+					// the listener. A pool entry binds a new egress to every
+					// new connection, so close the spent one and let the next
+					// attempt draw again instead of retiring the listener for
+					// the advertised window. Without this, a few quota hits
+					// take the whole pool out of rotation even though fresh
+					// egresses remain.
+					node.proxy.closeIdle()
+					node.proxy.noteQuotaHit()
 					lastErr = errFreeTierIPBlocked
 					blocked = true
 					deferred = true
-					g.logger.Warn("free tier usage limit reached; cooling the exit", "component", "upstream", "event", "free_usage_limit_reached", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "retry_after", resp.Header.Get("Retry-After"), "block_for", time.Until(until).String(), "body", logSnippet(body, 300))
+					g.logger.Warn("free tier usage limit reached; rotating the egress", "component", "upstream", "event", "free_usage_limit_reached", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "retry_after", resp.Header.Get("Retry-After"), "body", logSnippet(body, 300))
 					break
 				}
 				// Some 429s are charged to the conversation's session id: a
@@ -539,15 +540,16 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				}
 				break
 			} else if peekNetworkAbuseBlock(resp) {
-				// The free tier flagged this egress IP. The other lane leaves
-				// from the same IP and would answer the same way, so cool the
-				// exit and move on to another one instead of adding attempts
-				// that only lengthen the penalty. The body is restored, so the
-				// caller still forwards the upstream error.
-				node.proxy.markBlocked(time.Now().Add(g.freeTierBlockTTL()))
+				// The free tier flagged this egress IP. Retiring the listener
+				// would also retire every fresh egress it can still draw, so
+				// close the connection and try another draw. The body is
+				// restored, so the caller still forwards the upstream error.
+				node.proxy.closeIdle()
+				node.proxy.noteAbuseHit()
 				lastErr = errFreeTierIPBlocked
 				blocked = true
-				g.logger.Warn("free tier blocked the egress IP; cooling the exit", "component", "upstream", "event", "free_tier_ip_blocked", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "block_for", g.freeTierBlockTTL().String())
+				deferred = true
+				g.logger.Warn("free tier blocked the egress IP; rotating the egress", "component", "upstream", "event", "free_tier_ip_blocked", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name))
 				break
 			} else if isDeterministicClientResponse(resp.StatusCode, peekResponseBody(resp)) {
 				// The request is too long, malformed, or otherwise invalid on

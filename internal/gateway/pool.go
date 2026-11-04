@@ -38,6 +38,8 @@ type proxyTransport struct {
 	healthy      atomic.Bool
 	checking     atomic.Bool
 	blockedUntil atomic.Int64
+	quotaHits    atomic.Uint64
+	abuseHits    atomic.Uint64
 }
 
 // proxyTransports holds every configured proxy route, indexed by
@@ -62,6 +64,40 @@ func (t *proxyTransport) markBlocked(until time.Time) {
 		return
 	}
 	t.blockedUntil.Store(until.UnixNano())
+}
+
+// closeIdle drops pooled connections so the next attempt dials through a new
+// upstream connection. Rotating egress providers bind their exit IP to the
+// connection, not to the listener, so reusing a spent connection would keep
+// answering a quota or abuse error until the HTTP client expires it.
+func (t *proxyTransport) closeIdle() {
+	if t == nil {
+		return
+	}
+	if t.client != nil {
+		t.client.CloseIdleConnections()
+	}
+	if t.bun != nil {
+		t.bun.CloseIdleConnections()
+	}
+}
+
+// noteQuotaHit records a free-tier usage-limit response for health reporting.
+// The listener is not retired: the limit belongs to the egress IP, and a pool
+// entry draws a new egress on the next connection.
+func (t *proxyTransport) noteQuotaHit() {
+	if t != nil {
+		t.quotaHits.Add(1)
+	}
+}
+
+// noteAbuseHit records a free-tier abuse rejection for health reporting. Like
+// a quota hit, it is scoped to the egress connection and does not retire the
+// listener.
+func (t *proxyTransport) noteAbuseHit() {
+	if t != nil {
+		t.abuseHits.Add(1)
+	}
 }
 
 // anonymousNodes gives the shared OpenCode "public" credential an independent
@@ -443,6 +479,32 @@ func (p *proxyTransports) blockedCount(now time.Time) int {
 		}
 	}
 	return blocked
+}
+
+// quotaHits reports how many free-tier usage-limit responses the exits have
+// seen. It is observational: a quota hit rotates the egress connection instead
+// of retiring the listener.
+func (p *proxyTransports) quotaHits() int {
+	if p == nil {
+		return 0
+	}
+	hits := 0
+	for _, proxy := range p.items {
+		hits += int(proxy.quotaHits.Load())
+	}
+	return hits
+}
+
+// abuseHits reports how many free-tier abuse rejections the exits have seen.
+func (p *proxyTransports) abuseHits() int {
+	if p == nil {
+		return 0
+	}
+	hits := 0
+	for _, proxy := range p.items {
+		hits += int(proxy.abuseHits.Load())
+	}
+	return hits
 }
 
 // transportPool builds the HTTP clients of every configured proxy entry, each
