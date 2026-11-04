@@ -355,6 +355,14 @@ func (g *Gateway) maxAnonymousExits() int {
 // exhausting the proxy cursor returns control to the preferred authenticated
 // tiers. It returns the last response (body still open), else the last error,
 // plus the number of attempts made.
+//
+// A 429 is interpreted the way the WARP lane interprets it: the free tier
+// meters the conversation's session id as well as the egress IP, so the first
+// 429 of a request rotates the session identity and retries instead of
+// cooling the exit. A later 429 cools the held exit (a cooldown, not a
+// retirement: the exit can still serve other conversations) and rotates
+// again. Without this, one spent conversation kept answering 429 on every
+// fresh exit and burned the pool for the whole request budget.
 func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
 	if g.usesWARP(route.ID, config.TierZen, true) {
 		return g.doWarpAnonymousUpstream(ctx, route, bodies, ids, attemptOffset)
@@ -382,6 +390,14 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	}
 	proxies := 0
 	attempts := 0
+	// Rotations are keyed on the ids derived from the client, while the ids
+	// actually sent upstream follow the current generation. A spent session
+	// answers 429 on every exit, so moving the exit first would burn the pool
+	// without fixing the request (see sessionGuard).
+	baseIDs := ids
+	currentIDs := g.sessions.ResolveIDs(ids)
+	var heldNode *anonymousNode
+	var heldResp *http.Response
 	rawBody := bodies[config.TierZen]
 	if len(rawBody) == 0 {
 		return nil, errors.New("no prepared Zen request body"), 0
@@ -421,6 +437,9 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		proxies++
 		var nodeResp *http.Response
 		var nodeErr error
+		// deferred marks a 429 held against the session rather than the exit,
+		// so this node's result must not be fed back as a proxy failure.
+		deferred := false
 		for index, baseURL := range upstreams {
 			if ctx.Err() != nil {
 				if lastErr == nil && lastResponse == nil {
@@ -438,7 +457,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				httpx.DrainAndClose(lastResponse.Body)
 				lastResponse = nil
 			}
-			req, err := upstreamRequest(ctx, baseURL, protocol, preparedBodies[index], ids, anonymousZenKey)
+			req, err := upstreamRequest(ctx, baseURL, protocol, preparedBodies[index], currentIDs, anonymousZenKey)
 			if err != nil {
 				return nil, err, attempts
 			}
@@ -473,6 +492,25 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				if isProxyFailure(err) {
 					break
 				}
+			} else if resp.StatusCode == http.StatusTooManyRequests {
+				// The free tier meters the conversation's session id too, and a
+				// spent session keeps answering 429 on every fresh exit. Hold
+				// the first 429 against the session, rotate the identity and
+				// retry; cool the held exit only once a later 429 shows that
+				// the replacement session was rejected as well.
+				first429 := heldNode == nil
+				if !first429 {
+					// Cool the held exit without counting a lane failure: a
+					// 429 says nothing about the lane's health, the way the
+					// WARP lane already treats it.
+					g.anonymous.MarkFailure(heldNode, heldResp, nil)
+				}
+				previousSession := currentIDs.Session
+				currentIDs = g.sessions.RotateIDs(baseIDs)
+				heldNode, heldResp = node, resp
+				deferred = true
+				g.logger.Info("free tier 429; rotating the session identity", "component", "upstream", "event", "session_identity_rotated", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "from_session", previousSession, "to_session", currentIDs.Session, "generation", g.sessions.Generation(baseIDs.Session), "first_429", first429)
+				break
 			} else if peekNetworkAbuseBlock(resp) {
 				// The free tier flagged this egress IP. The other lane leaves
 				// from the same IP and would answer the same way, so cool the
@@ -508,6 +546,12 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		}
 		if ctx.Err() != nil {
 			break
+		}
+		if deferred {
+			// The 429 was charged to the conversation's session, not to this
+			// exit; the held exit is cooled if a later attempt rejects the
+			// rotated session as well.
+			continue
 		}
 		g.observeAnonymousResult(ctx, node, nodeResp, nodeErr)
 		if g.anonymous.Open() {
