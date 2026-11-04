@@ -430,6 +430,21 @@ func (p *proxyTransports) healthCounts() (total, healthy int) {
 	return len(p.items), healthy
 }
 
+// blockedCount reports how many exit transports the free tier has retired:
+// either its IP is flagged or its daily allowance is spent.
+func (p *proxyTransports) blockedCount(now time.Time) int {
+	if p == nil {
+		return 0
+	}
+	blocked := 0
+	for _, proxy := range p.items {
+		if proxy.blocked(now) {
+			blocked++
+		}
+	}
+	return blocked
+}
+
 // transportPool builds the HTTP clients of every configured proxy entry, each
 // entry starting healthy: a regular client and a Bun-disguised one
 // (httpx.BunTransport) sharing the proxy, connect timeout, idle settings and

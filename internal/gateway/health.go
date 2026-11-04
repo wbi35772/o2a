@@ -46,6 +46,7 @@ type healthProxies struct {
 	Total     int `json:"total"`
 	Healthy   int `json:"healthy"`
 	Unhealthy int `json:"unhealthy"`
+	Blocked   int `json:"blocked"`
 }
 
 // healthWarp reports the state of the userspace WARP pool. It is omitted when
@@ -69,6 +70,7 @@ type healthWarp struct {
 func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, models := g.availableModels()
 	proxyTotal, proxyHealthy := g.transports.healthCounts()
+	proxyBlocked := g.transports.blockedCount(time.Now())
 	zenKeys, goKeys := g.zenNodes.Len(), g.goNodes.Len()
 	staleAfter := max(2*time.Duration(g.cfg.Models.RefreshSeconds)*time.Second, time.Minute)
 	var warpStatus *healthWarp
@@ -120,6 +122,9 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if proxyHealthy == 0 {
 		issues = append(issues, "no_healthy_proxies")
 	}
+	if g.cfg.Anonymous && proxyTotal > 0 && proxyBlocked == proxyTotal {
+		issues = append(issues, "anonymous_exits_exhausted")
+	}
 
 	status := "ok"
 	if len(issues) > 0 {
@@ -154,6 +159,7 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			Total:     proxyTotal,
 			Healthy:   proxyHealthy,
 			Unhealthy: proxyTotal - proxyHealthy,
+			Blocked:   proxyBlocked,
 		},
 		Warp:   warpStatus,
 		Issues: issues,

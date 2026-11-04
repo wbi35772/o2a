@@ -10,18 +10,19 @@ import (
 )
 
 // errFreeTierIPBlocked reports that OpenCode's free gateway refused the request
-// because it flagged the egress IP, not the request, the key or the session.
-// Unlike the shape gates, another lane, key or retry cannot fix it: the same
-// IP gets the same answer, and retrying only extends the penalty. The request
-// must therefore leave the anonymous lane instead of walking its upstreams,
-// and the exit must stay out of the cursor until the block expires.
+// because of the egress IP, not the request, the key or the session: it either
+// flagged the IP or the IP's daily free allowance is spent. Unlike the shape
+// gates, another lane, key or retry cannot fix it: the same IP gets the same
+// answer, and retrying only extends the penalty. The request must therefore
+// leave the anonymous lane instead of walking its upstreams, and the exit must
+// stay out of the cursor until the block or the quota window expires.
 var errFreeTierIPBlocked = errors.New("free tier blocked the egress IP")
 
-// freeTierBlockedMessage is what a client receives while its exit is blocked.
-// The upstream message tells people to turn off a VPN, which is wrong for a
-// server that egresses through a proxy; this one names the real cause and the
-// two ways out.
-const freeTierBlockedMessage = "OpenCode is blocking free-model traffic from the IP this gateway leaves from, so retrying now cannot succeed. Route the request through another exit or wait for the block to expire."
+// freeTierBlockedMessage is what a client receives while every exit it could
+// reach is retired. The upstream message tells people to turn off a VPN, which
+// is wrong for a server that egresses through a proxy; this one names the real
+// causes and the ways out.
+const freeTierBlockedMessage = "Every exit this gateway could use has spent its OpenCode free-model quota or is blocked by IP, so retrying now cannot succeed. Add exits with fresh IPs, wait for the daily quota reset (around 00:00 UTC), or configure an authenticated key."
 
 // errAnonymousLanePaused reports that the anonymous lane's circuit breaker has
 // paused the whole lane. Unlike an upstream rejection, another exit or a retry
