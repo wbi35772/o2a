@@ -334,6 +334,7 @@ func newPool(ctx context.Context, log logger, size int, statePath string, create
 		cancel()
 		return nil, err
 	}
+	stack := first
 	if first != nil {
 		p.active = []*exit{first}
 	} else {
@@ -343,7 +344,11 @@ func newPool(ctx context.Context, log logger, size int, statePath string, create
 		}
 	}
 	if log != nil {
-		log.Infof("OpenCode WARP/%s pool ready (max %d exits, preloading %d)", first.stack, size, preload)
+		if stack != nil {
+			log.Infof("OpenCode WARP/%s pool ready (max %d exits, preloading %d)", stack.stack, size, preload)
+		} else {
+			log.Infof("OpenCode WARP pool ready with 0 exits (max %d, preloading %d); refill pending", size, preload)
+		}
 	}
 	p.startRefill()
 	return p, nil
