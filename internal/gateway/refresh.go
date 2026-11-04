@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	proxyHealthCheckURL      = "https://cloudflare.com/cdn-cgi/trace"
+	proxyHealthCheckURL      = "https://opencode.ai/inference"
 	proxyHealthCheckInterval = 15 * time.Minute
 	proxyHealthCheckTimeout  = 10 * time.Second
 )

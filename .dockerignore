@@ -9,7 +9,7 @@
 !webui/**
 !config.example.json
 !docker-entrypoint.sh
-!cfnew-sidecar.sh
+!proxyctl
 !opencode2api-wrapper.sh
 !Dockerfile
 !LICENSE

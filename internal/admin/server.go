@@ -37,13 +37,21 @@ type Server struct {
 	lastInference *DebugInferenceResult
 	quotaMu       sync.Mutex
 	quotaCache    map[string]quotaCacheEntry
+
+	// stateDir is the directory holding config.json, so the proxy center keeps
+	// its state, listeners and generated proxy list beside it.
+	stateDir   string
+	proxyMu    sync.Mutex
+	proxyJobMu sync.Mutex
+	proxyJob   ProxyJob
 }
 
-// New returns a Server for manager, reporting to monitor and logs.
-func New(manager *gateway.RuntimeController, monitor *telemetry.Metrics, logs *telemetry.LogBroker, logger *slog.Logger) *Server {
+// New returns a Server for manager, reporting to monitor and logs. stateDir is
+// the directory of config.json, where the proxy center stores its state.
+func New(manager *gateway.RuntimeController, monitor *telemetry.Metrics, logs *telemetry.LogBroker, logger *slog.Logger, stateDir string) *Server {
 	return &Server{
 		manager: manager, monitor: monitor, logs: logs, logger: logger, sessions: make(map[string]adminSession),
-		attempts: make(map[string]loginWindow), debugAttempts: make(map[string]loginWindow),
+		attempts: make(map[string]loginWindow), debugAttempts: make(map[string]loginWindow), stateDir: stateDir,
 	}
 }
 
@@ -79,6 +87,18 @@ func (a *Server) Handler() http.Handler {
 	mux.Handle("POST /api/debug/inference", a.authenticate(a.csrf(http.HandlerFunc(a.handleDebugInference))))
 	mux.Handle("GET /api/logs", a.authenticate(http.HandlerFunc(a.handleLogs)))
 	mux.Handle("GET /api/logs/stream", a.authenticate(http.HandlerFunc(a.handleLogStream)))
+	mux.Handle("GET /api/proxy", a.authenticate(http.HandlerFunc(a.handleProxyState)))
+	mux.Handle("GET /api/proxy/nodes", a.authenticate(http.HandlerFunc(a.handleProxyNodes)))
+	mux.Handle("POST /api/proxy/providers", a.authenticate(a.csrf(http.HandlerFunc(a.handleProxyProviderAdd))))
+	mux.Handle("PATCH /api/proxy/providers/{id}", a.authenticate(a.csrf(http.HandlerFunc(a.handleProxyProviderUpdate))))
+	mux.Handle("DELETE /api/proxy/providers/{id}", a.authenticate(a.csrf(http.HandlerFunc(a.handleProxyProviderDelete))))
+	mux.Handle("PUT /api/proxy/settings", a.authenticate(a.csrf(http.HandlerFunc(a.handleProxySettings))))
+	mux.Handle("POST /api/proxy/sync", a.authenticate(a.csrf(http.HandlerFunc(a.handleProxySync))))
+	mux.Handle("POST /api/proxy/select", a.authenticate(a.csrf(http.HandlerFunc(a.handleProxySelect))))
+	mux.Handle("POST /api/proxy/test", a.authenticate(a.csrf(http.HandlerFunc(a.handleProxyTest))))
+	mux.Handle("GET /api/proxy/logs", a.authenticate(http.HandlerFunc(a.handleProxyLogs)))
+	mux.Handle("GET /api/proxy/export", a.authenticate(http.HandlerFunc(a.handleProxyExport)))
+	mux.Handle("POST /api/proxy/import", a.authenticate(a.csrf(http.HandlerFunc(a.handleProxyImport))))
 	mux.Handle("/", a.staticHandler())
 	return a.securityHeaders(telemetry.Recover(a.logger, mux))
 }

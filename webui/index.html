@@ -54,6 +54,7 @@
             <div class="nav-group-title" data-i18n="nav.group.runtime">运行</div>
             <button class="nav-item active" data-page="overview" data-i18n="nav.overview">概览</button>
             <button class="nav-item" data-page="diagnostics" data-i18n="nav.diagnostics">诊断</button>
+            <button class="nav-item" data-page="proxy" data-i18n="nav.proxy">代理中心</button>
           </div>
           <div class="nav-group">
             <div class="nav-group-title" data-i18n="nav.group.integration">接入</div>
@@ -785,6 +786,158 @@
                   </thead>
                   <tbody id="rotation-attempts"></tbody>
                 </table>
+              </div>
+            </section>
+          </section>
+
+          <section id="page-proxy" class="page hidden">
+            <section class="section">
+              <div class="section-head">
+                <div>
+                  <h2 class="section-title" data-i18n="proxy.title">代理中心</h2>
+                  <p class="section-caption" data-i18n="proxy.caption">
+                    订阅 → 节点池 → 本地 SOCKS 出口。添加订阅后点「同步订阅」，测试通过再应用。
+                  </p>
+                </div>
+                <div class="actions">
+                  <button id="proxy-refresh" class="btn btn-sm" data-i18n="proxy.refresh">刷新</button>
+                  <button id="proxy-sync" class="btn btn-sm btn-primary" data-i18n="proxy.sync">同步订阅</button>
+                </div>
+              </div>
+              <div id="proxy-cards" class="facts"></div>
+              <p id="proxy-status" class="section-caption" role="status"></p>
+            </section>
+
+            <section class="section">
+              <div id="proxy-tabs" class="tabs" role="tablist" aria-label="代理中心分区">
+                <button class="tab active" data-panel="nodes" role="tab" aria-selected="true" data-i18n="proxy.tab.nodes">节点与出口</button>
+                <button class="tab" data-panel="providers" role="tab" aria-selected="false" data-i18n="proxy.tab.providers">订阅</button>
+                <button class="tab" data-panel="settings" role="tab" aria-selected="false" data-i18n="proxy.tab.settings">设置</button>
+                <button class="tab" data-panel="logs" role="tab" aria-selected="false" data-i18n="proxy.tab.logs">日志</button>
+              </div>
+
+              <div data-panel="nodes" class="stack" role="tabpanel">
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="proxy-filter-status" data-i18n="proxy.filter.status">状态</label>
+                    <select id="proxy-filter-status">
+                      <option value="" data-i18n="proxy.filter.all">全部</option>
+                      <option value="alive" data-i18n="proxy.state.alive">可用</option>
+                      <option value="limited" data-i18n="proxy.state.limited">限流</option>
+                      <option value="dead" data-i18n="proxy.state.dead">不通</option>
+                      <option value="unknown" data-i18n="proxy.state.unknown">未测试</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="proxy-filter-q" data-i18n="proxy.filter.search">搜索</label>
+                    <input id="proxy-filter-q" placeholder="名称或服务器" />
+                  </div>
+                </div>
+                <div class="actions">
+                  <button id="proxy-test-all" class="btn btn-sm" data-i18n="proxy.testAll">测试当前筛选</button>
+                  <button id="proxy-test-picked" class="btn btn-sm" data-i18n="proxy.testPicked">测试勾选</button>
+                  <button id="proxy-apply" class="btn btn-sm btn-primary" data-i18n="proxy.apply">应用勾选</button>
+                  <button id="proxy-apply-auto" class="btn btn-sm" data-i18n="proxy.applyAuto">只应用可用</button>
+                </div>
+                <div class="table-wrap">
+                  <table class="table">
+                    <thead>
+                      <tr>
+                        <th class="num" data-i18n="proxy.col.pick">选</th>
+                        <th data-i18n="proxy.col.name">节点</th>
+                        <th data-i18n="proxy.col.provider">订阅</th>
+                        <th data-i18n="proxy.col.type">类型</th>
+                        <th data-i18n="proxy.col.server">服务器</th>
+                        <th class="num" data-i18n="proxy.col.port">本地端口</th>
+                        <th data-i18n="proxy.col.state">状态</th>
+                        <th class="num" data-i18n="proxy.col.latency">延迟</th>
+                        <th data-i18n="proxy.col.tested">最近测试</th>
+                        <th data-i18n="proxy.col.action">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="proxy-nodes"></tbody>
+                  </table>
+                </div>
+                <div class="actions">
+                  <button id="proxy-prev" class="btn btn-sm" data-i18n="proxy.prev">上一页</button>
+                  <span id="proxy-page" class="section-caption"></span>
+                  <button id="proxy-next" class="btn btn-sm" data-i18n="proxy.next">下一页</button>
+                </div>
+              </div>
+
+              <div data-panel="providers" class="stack hidden" role="tabpanel">
+                <form id="proxy-provider-form" class="stack">
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="proxy-provider-name" data-i18n="proxy.provider.name">名称</label>
+                      <input id="proxy-provider-name" placeholder="cf4" required />
+                    </div>
+                    <div class="field full">
+                      <label for="proxy-provider-url" data-i18n="proxy.provider.url">订阅地址</label>
+                      <input id="proxy-provider-url" placeholder="https://example.com/sub" required />
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button class="btn btn-sm btn-primary" type="submit" data-i18n="proxy.provider.add">添加订阅</button>
+                  </div>
+                </form>
+                <div class="table-wrap">
+                  <table class="table">
+                    <thead>
+                      <tr>
+                        <th data-i18n="proxy.provider.col.id">ID</th>
+                        <th data-i18n="proxy.provider.col.name">名称</th>
+                        <th data-i18n="proxy.provider.col.url">地址</th>
+                        <th class="num" data-i18n="proxy.provider.col.nodes">节点</th>
+                        <th data-i18n="proxy.provider.col.fetch">上次拉取</th>
+                        <th data-i18n="proxy.provider.col.error">错误</th>
+                        <th class="num" data-i18n="proxy.provider.col.enabled">启用</th>
+                        <th data-i18n="proxy.provider.col.action">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="proxy-providers"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div data-panel="settings" class="stack hidden" role="tabpanel">
+                <form id="proxy-settings-form" class="stack">
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="proxy-node-count" data-i18n="proxy.settings.count">出口数量</label>
+                      <input id="proxy-node-count" type="number" min="1" max="2000" />
+                    </div>
+                    <div class="field">
+                      <label for="proxy-port-base" data-i18n="proxy.settings.portBase">端口起点</label>
+                      <input id="proxy-port-base" type="number" min="1024" max="59000" />
+                    </div>
+                    <div class="field">
+                      <label for="proxy-timeout" data-i18n="proxy.settings.timeout">测试超时（秒）</label>
+                      <input id="proxy-timeout" type="number" min="1" max="60" />
+                    </div>
+                    <div class="field full">
+                      <label for="proxy-test-url" data-i18n="proxy.settings.testUrl">测试地址</label>
+                      <input id="proxy-test-url" placeholder="https://opencode.ai/" />
+                    </div>
+                  </div>
+                  <label class="check">
+                    <input id="proxy-auto-select" type="checkbox" />
+                    <span data-i18n="proxy.settings.autoSelect">测试后自动只应用可用节点</span>
+                  </label>
+                  <div class="actions">
+                    <button class="btn btn-sm btn-primary" type="submit" data-i18n="proxy.settings.save">保存设置</button>
+                  </div>
+                  <p class="section-caption" data-i18n="proxy.settings.note">
+                    修改数量或端口起点后需要重新同步。测试会通过每个本地 SOCKS 端口真实请求测试地址。
+                  </p>
+                </form>
+              </div>
+
+              <div data-panel="logs" class="stack hidden" role="tabpanel">
+                <div class="actions">
+                  <button id="proxy-logs-refresh" class="btn btn-sm" data-i18n="proxy.logs.refresh">刷新日志</button>
+                </div>
+                <pre id="proxy-logs" class="logs"></pre>
               </div>
             </section>
           </section>

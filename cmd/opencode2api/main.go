@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -65,7 +66,7 @@ func main() {
 	servers := []*http.Server{apiServer}
 
 	if cfg.WebUI.Enabled {
-		admin := adminui.New(manager, monitor, hub, logger)
+		admin := adminui.New(manager, monitor, hub, logger, filepath.Dir(*configPath))
 		if *webSamePort {
 			apiServer.Handler = samePortHandler(apiServer.Handler, admin.Handler())
 		} else {
