@@ -302,6 +302,16 @@ func newPool(ctx context.Context, log logger, size int, statePath string, create
 	// failure still fails closed.
 	first, err := p.createExit(ctx)
 	for err != nil {
+		// When the entire /64 supply is blacklisted (e.g. 97 spent blocks),
+		// retrying the same pool only repeats 429. Start with an empty ring
+		// so the service lives; the background refill and the 5-second
+		// Acquire timeout will surface 503 instead of crashing.
+		if errors.Is(err, errDuplicateEgress) && p.statePath != "" {
+			if p.logger != nil {
+				p.logger.Warnf("OpenCode WARP pool starts empty: all %d /64 blocks cooled (%s); first exit deferred to refill", len(p.cooling), p.statePath)
+			}
+			break
+		}
 		pause := registrationPause(err)
 		if pause <= 0 {
 			cancel()
@@ -320,7 +330,18 @@ func newPool(ctx context.Context, log logger, size int, statePath string, create
 		}
 		first, err = p.createExit(ctx)
 	}
-	p.active = []*exit{first}
+	if err != nil && !errors.Is(err, errDuplicateEgress) {
+		cancel()
+		return nil, err
+	}
+	if first != nil {
+		p.active = []*exit{first}
+	} else {
+		p.active = []*exit{}
+		if log != nil {
+			log.Warnf("OpenCode WARP pool starts with 0 exits; cooling=%d known=%d", len(p.cooling), len(p.known))
+		}
+	}
 	if log != nil {
 		log.Infof("OpenCode WARP/%s pool ready (max %d exits, preloading %d)", first.stack, size, preload)
 	}
