@@ -21,7 +21,21 @@ RUN CGO_ENABLED=0 \
 
 FROM alpine:3.22
 
-RUN apk add --no-cache ca-certificates su-exec tzdata \
+ARG TARGETARCH=amd64
+ARG MIHOMO_VERSION=v1.19.33
+
+RUN apk add --no-cache ca-certificates su-exec tzdata jq yq-go \
+    && case "${TARGETARCH}" in \
+         arm64) mihomo_arch=arm64 ;; \
+         *)     mihomo_arch=amd64-compatible ;; \
+       esac \
+    && { wget -qO /tmp/mihomo.gz \
+         "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-${mihomo_arch}-${MIHOMO_VERSION}.gz" \
+         || wget -qO /tmp/mihomo.gz \
+         "https://gh-proxy.com/https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-${mihomo_arch}-${MIHOMO_VERSION}.gz"; } \
+    && gunzip -c /tmp/mihomo.gz > /usr/local/bin/mihomo \
+    && chmod 0755 /usr/local/bin/mihomo \
+    && rm -f /tmp/mihomo.gz \
     && addgroup -S opencode2api \
     && adduser -S -G opencode2api -h /var/lib/opencode2api opencode2api \
     && mkdir -p /app /var/lib/opencode2api \
@@ -29,6 +43,7 @@ RUN apk add --no-cache ca-certificates su-exec tzdata \
 
 COPY --from=builder /out/opencode2api /usr/local/bin/opencode2api
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
+COPY --chmod=0755 cfnew-sidecar.sh /usr/local/bin/cfnew-sidecar
 COPY --chown=opencode2api:opencode2api config.example.json /app/config.example.json
 COPY LICENSE /usr/share/licenses/opencode2api/LICENSE
 LABEL org.opencontainers.image.licenses="GPL-3.0-or-later"
