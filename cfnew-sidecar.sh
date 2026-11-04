@@ -1,54 +1,97 @@
 #!/bin/sh
-# Turn a cfnew/Clash subscription into a local SOCKS pool for the free tier.
+# Turn cfnew/Clash subscriptions into a local SOCKS pool for the free tier.
 #
 # The container has no global IPv6, so the WARP /64 pool is the wrong exit
-# mechanism. This sidecar fetches the Clash view of the subscription, gives
-# every selected node its own loopback SOCKS listener inside one mihomo
-# process, writes the listener URLs to a proxyfile, and points the app at it
-# with WARP disabled (while a WARP pool exists the free tier ignores proxies).
+# mechanism. This sidecar fetches the Clash view of every configured
+# subscription, gives each selected node its own loopback SOCKS listener inside
+# one mihomo process, writes the listener URLs to a proxyfile, and points the
+# app at it with WARP disabled (while a WARP pool exists the free tier ignores
+# proxies).
 #
-# It runs before the app starts. Any failure leaves the existing config alone.
+# Sources: CF_SUB_URL (may hold several URLs separated by whitespace) plus one
+# URL per line in $state_dir/cfnew-sub.txt. It runs before the app starts; any
+# failure leaves the existing config alone.
 set -eu
 
 state_dir=${STATE_DIR:-/var/lib/opencode2api}
 config_path=${CONFIG_PATH:-$state_dir/config.json}
 work_dir=$state_dir/cfnew
 
-sub_url=${CF_SUB_URL:-}
-if [ -z "$sub_url" ] && [ -s "$state_dir/cfnew-sub.txt" ]; then
-    sub_url=$(tr -d '\r\n' < "$state_dir/cfnew-sub.txt")
-fi
-if [ -z "$sub_url" ]; then
-    exit 0
-fi
-
-node_count=${CF_NODE_COUNT:-200}
+node_count=${CF_NODE_COUNT:-300}
 port_base=${CF_PORT_BASE:-21000}
 
 mkdir -p "$work_dir"
 
 log() { printf 'cfnew: %s\n' "$*" >&2; }
 
-# 1. Fetch the Clash-format view of the subscription.
-case "$sub_url" in
-    *\?*) separator='&' ;;
-    *)    separator='?' ;;
-esac
-if ! wget -q -T 20 -U 'clash.meta' -O "$work_dir/subscription.yaml" "${sub_url}${separator}target=clash"; then
-    log 'subscription fetch failed; keeping the current configuration'
-    exit 0
+# 1. Collect subscription URLs, newest file entries last, and fetch each Clash
+#    view. One broken subscription must not stop the others.
+urls=""
+if [ -n "${CF_SUB_URL:-}" ]; then
+    urls=$CF_SUB_URL
 fi
-if ! yq -e '.proxies | length > 0' "$work_dir/subscription.yaml" >/dev/null 2>&1; then
-    log 'subscription has no proxies; keeping the current configuration'
+if [ -s "$state_dir/cfnew-sub.txt" ]; then
+    urls="$urls
+$(tr -d '\r' < "$state_dir/cfnew-sub.txt")"
+fi
+
+files=""
+index=0
+fetch_one() {
+    url=$1
+    index=$((index + 1))
+    yaml=$work_dir/sub-$index.yaml
+    case "$url" in
+        *\?*) separator='&' ;;
+        *)    separator='?' ;;
+    esac
+    if ! wget -q -T 25 -U 'clash.meta' -O "$yaml" "${url}${separator}target=clash"; then
+        log "fetch failed: $url"
+        return 0
+    fi
+    if ! yq -e '.proxies | length > 0' "$yaml" >/dev/null 2>&1; then
+        log "no proxies in: $url"
+        return 0
+    fi
+    if ! yq -o=json '.' "$yaml" > "$work_dir/sub-$index.json"; then
+        log "cannot parse: $url"
+        return 0
+    fi
+    files="$files $work_dir/sub-$index.json"
+}
+
+old_ifs=$IFS
+IFS='
+'
+for url in $urls; do
+    IFS=$old_ifs
+    url=$(printf '%s' "$url" | tr -d ' \t')
+    [ -z "$url" ] && continue
+    fetch_one "$url"
+    IFS='
+'
+done
+IFS=$old_ifs
+
+if [ -z "$files" ]; then
+    log 'no usable subscription; keeping the current configuration'
     exit 0
 fi
 
-# 2. Build the mihomo config. Nodes are sampled evenly so the selection spans
-#    the whole subscription instead of only its first region.
-yq -o=json '.' "$work_dir/subscription.yaml" > "$work_dir/subscription.json"
+# 2. Merge the subscriptions. Every node gets a source-and-index prefix so
+#    equal node names from different subscriptions cannot collide.
+# shellcheck disable=SC2086
+jq -s '[range(0; length) as $i
+        | .[$i].proxies | to_entries[]
+        | .value.name = ("s" + ($i | tostring) + "-" + (.key | tostring) + "|" + .value.name)
+        | .value]' \
+    $files > "$work_dir/merged.json"
+
+# 3. Build the mihomo config. Nodes are sampled evenly so the selection spans
+#    every subscription instead of only its first region.
 jq --argjson want "$node_count" --argjson base "$port_base" '
-  .proxies as $p
-  | ($p | length) as $total
+  . as $all
+  | ($all | length) as $total
   | (if $total <= $want then [range(0; $total)]
      else [range(0; $want) | (. * $total / $want | floor)] end) as $idx
   | {
@@ -56,7 +99,7 @@ jq --argjson want "$node_count" --argjson base "$port_base" '
       "log-level": "warning",
       ipv6: false,
       rules: ["MATCH,DIRECT"],
-      proxies: [$idx[] as $i | $p[$i]],
+      proxies: [$idx[] as $i | $all[$i]],
       listeners: [
         $idx | to_entries[]
         | {
@@ -65,33 +108,40 @@ jq --argjson want "$node_count" --argjson base "$port_base" '
             listen: "127.0.0.1",
             port: ($base + .key),
             udp: false,
-            proxy: $p[.value].name
+            proxy: $all[.value].name
           }
       ]
     }
-' "$work_dir/subscription.json" > "$work_dir/mihomo.json"
+' "$work_dir/merged.json" > "$work_dir/mihomo.json"
 
 yq -p=json -o=yaml '.' "$work_dir/mihomo.json" > "$work_dir/mihomo.yaml"
 jq -r '.listeners[] | "socks5://127.0.0.1:\(.port)"' "$work_dir/mihomo.json" > "$work_dir/proxies.txt"
 jq -r '.listeners | length' "$work_dir/mihomo.json" > "$work_dir/count"
 
 count=$(cat "$work_dir/count")
-total=$(jq -r '.proxies | length' "$work_dir/subscription.json")
-log "selected $count of $total nodes"
+total=$(jq -r 'length' "$work_dir/merged.json")
+log "selected $count of $total nodes from $(printf '%s' "$files" | wc -w | tr -d ' ') subscriptions"
 if [ "$count" -eq 0 ]; then
     log 'no nodes selected; keeping the current configuration'
     exit 0
 fi
 
-# 3. Start mihomo. A stale instance from an earlier boot is replaced.
+# 4. Start mihomo. A stale instance from an earlier boot is replaced.
 if [ -f "$work_dir/mihomo.pid" ]; then
-    kill "$(cat "$work_dir/mihomo.pid")" 2>/dev/null || true
+    old_pid=$(cat "$work_dir/mihomo.pid")
+    kill "$old_pid" 2>/dev/null || true
+    tries=0
+    while kill -0 "$old_pid" 2>/dev/null && [ "$tries" -lt 5 ]; do
+        tries=$((tries + 1))
+        sleep 1
+    done
+    kill -9 "$old_pid" 2>/dev/null || true
 fi
 /usr/local/bin/mihomo -d "$work_dir" -f "$work_dir/mihomo.yaml" > "$work_dir/mihomo.log" 2>&1 &
 mihomo_pid=$!
 printf '%s\n' "$mihomo_pid" > "$work_dir/mihomo.pid"
 
-# 4. Wait until the last listener is accepting connections. mihomo binds them
+# 5. Wait until the last listener is accepting connections. mihomo binds them
 #    in order, so the last one proves the whole range is up. /proc/net/tcp
 #    lists TCP sockets; state 0A is LISTEN.
 wait_listener() {
@@ -101,7 +151,7 @@ wait_listener() {
 last_port=$((port_base + count - 1))
 ready=0
 i=0
-while [ "$i" -lt 20 ]; do
+while [ "$i" -lt 30 ]; do
     if ! kill -0 "$mihomo_pid" 2>/dev/null; then
         log "mihomo exited during startup; see $work_dir/mihomo.log"
         break
@@ -118,7 +168,7 @@ if [ "$ready" -ne 1 ]; then
     exit 0
 fi
 
-# 5. Point the app at the pool. Keep one untouched copy of the WARP-era config
+# 6. Point the app at the pool. Keep one untouched copy of the WARP-era config
 #    the first time this runs.
 if [ -f "$config_path" ]; then
     if [ ! -f "$config_path.warp-backup" ]; then
