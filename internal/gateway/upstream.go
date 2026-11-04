@@ -509,7 +509,18 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				currentIDs = g.sessions.RotateIDs(baseIDs)
 				heldNode, heldResp = node, resp
 				deferred = true
-				g.logger.Info("free tier 429; rotating the session identity", "component", "upstream", "event", "session_identity_rotated", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "from_session", previousSession, "to_session", currentIDs.Session, "generation", g.sessions.Generation(baseIDs.Session), "first_429", first429)
+				g.logger.Info("free tier 429; rotating the session identity", "component", "upstream", "event", "session_identity_rotated", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "from_session", previousSession, "to_session", currentIDs.Session, "generation", g.sessions.Generation(baseIDs.Session), "first_429", first429, "retry_after", resp.Header.Get("Retry-After"), "ratelimit", resp.Header.Get("x-ratelimit-limit")+"/"+resp.Header.Get("x-ratelimit-remaining")+"/"+resp.Header.Get("x-ratelimit-reset"), "body", logSnippet(peekResponseBody(resp), 300))
+				// A burst of parallel requests shares one conversation and
+				// hammers the metered endpoint with back-to-back rotations.
+				// Pace the next attempt unless this is the request's first
+				// 429, where the held exit is about to be retried and the
+				// normal path already took a fresh exit.
+				if !first429 {
+					select {
+					case <-ctx.Done():
+					case <-time.After(300 * time.Millisecond):
+					}
+				}
 				break
 			} else if peekNetworkAbuseBlock(resp) {
 				// The free tier flagged this egress IP. The other lane leaves
@@ -1342,6 +1353,17 @@ func v1ProviderUtils(protocol wire.Protocol) string {
 	default:
 		return httpx.V1ChatSDK
 	}
+}
+
+// logSnippet renders response bytes for one log field: trimmed, whitespace
+// collapsed, and cut at n runes so a large error payload cannot flood the log.
+func logSnippet(body []byte, n int) string {
+	text := strings.Join(strings.Fields(string(body)), " ")
+	runes := []rune(text)
+	if len(runes) > n {
+		return string(runes[:n]) + "…"
+	}
+	return text
 }
 
 // gitCommitPattern matches the git root commit hash OpenCode uses as its
