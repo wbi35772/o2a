@@ -11,11 +11,13 @@ import (
 // conversation and moves it to a fresh generation when the upstream reports
 // the session's quota as spent.
 //
-// The free tier ties its quota and risk bookkeeping to the session id, not only
-// to the egress address: a conversation that has exhausted its free allowance
-// keeps answering HTTP 429 "Free usage limit reached" on every fresh WARP exit,
-// while a new session on the same exit succeeds. Rotating the exit in that
-// situation burns the whole pool for 24 hours without fixing the request.
+// Some free-tier limits are keyed to the session id, not only to the egress
+// address: a conversation that has spent its per-session allowance keeps
+// answering HTTP 429 on every fresh exit while a new session on the same exit
+// succeeds. That case is distinct from FreeUsageLimitError, which meters the
+// exit address for hours (see freeUsageBlockTTL); rotating the session for the
+// latter only burns generations. Rotating the exit in the former burns the
+// whole pool without fixing the request.
 //
 // Generation zero is the id derived from the client conversation. Every burn
 // increments the generation; the id sent upstream is a stable, canonical

@@ -493,7 +493,23 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 					break
 				}
 			} else if resp.StatusCode == http.StatusTooManyRequests {
-				// The free tier meters the conversation's session id too, and a
+				body := peekResponseBody(resp)
+				if isFreeUsageLimitBody(body) {
+					// The free allowance is metered per egress address for
+					// hours (the header at 2026-11-04 asked for ~16h), and a
+					// fresh conversation session on the same exit answers the
+					// same. Retire the exit for the advertised window and move
+					// on: rotating the session here would only burn
+					// generations without clearing the quota.
+					until := time.Now().Add(g.freeUsageBlockTTL(resp.Header.Get("Retry-After")))
+					node.proxy.markBlocked(until)
+					lastErr = errFreeTierIPBlocked
+					blocked = true
+					deferred = true
+					g.logger.Warn("free tier usage limit reached; cooling the exit", "component", "upstream", "event", "free_usage_limit_reached", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "retry_after", resp.Header.Get("Retry-After"), "block_for", time.Until(until).String(), "body", logSnippet(body, 300))
+					break
+				}
+				// Some 429s are charged to the conversation's session id: a
 				// spent session keeps answering 429 on every fresh exit. Hold
 				// the first 429 against the session, rotate the identity and
 				// retry; cool the held exit only once a later 429 shows that
@@ -509,7 +525,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				currentIDs = g.sessions.RotateIDs(baseIDs)
 				heldNode, heldResp = node, resp
 				deferred = true
-				g.logger.Info("free tier 429; rotating the session identity", "component", "upstream", "event", "session_identity_rotated", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "from_session", previousSession, "to_session", currentIDs.Session, "generation", g.sessions.Generation(baseIDs.Session), "first_429", first429, "retry_after", resp.Header.Get("Retry-After"), "ratelimit", resp.Header.Get("x-ratelimit-limit")+"/"+resp.Header.Get("x-ratelimit-remaining")+"/"+resp.Header.Get("x-ratelimit-reset"), "body", logSnippet(peekResponseBody(resp), 300))
+				g.logger.Info("free tier 429; rotating the session identity", "component", "upstream", "event", "session_identity_rotated", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "from_session", previousSession, "to_session", currentIDs.Session, "generation", g.sessions.Generation(baseIDs.Session), "first_429", first429, "retry_after", resp.Header.Get("Retry-After"), "ratelimit", resp.Header.Get("x-ratelimit-limit")+"/"+resp.Header.Get("x-ratelimit-remaining")+"/"+resp.Header.Get("x-ratelimit-reset"), "body", logSnippet(body, 300))
 				// A burst of parallel requests shares one conversation and
 				// hammers the metered endpoint with back-to-back rotations.
 				// Pace the next attempt unless this is the request's first
@@ -559,9 +575,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			break
 		}
 		if deferred {
-			// The 429 was charged to the conversation's session, not to this
-			// exit; the held exit is cooled if a later attempt rejects the
-			// rotated session as well.
+			// The 429 was charged to the conversation's session or to the
+			// exit's quota, not to the lane; the held exit is cooled if a
+			// later attempt rejects the rotated session as well, and a quota
+			// hit already retired its own exit.
 			continue
 		}
 		g.observeAnonymousResult(ctx, node, nodeResp, nodeErr)

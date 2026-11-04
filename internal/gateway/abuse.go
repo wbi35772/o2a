@@ -48,6 +48,22 @@ func (g *Gateway) freeTierBlockTTL() time.Duration {
 	return freeTierBlockTTL
 }
 
+// maxFreeUsageBlockTTL bounds how long a FreeUsageLimitError keeps an exit out
+// of rotation. The upstream's Retry-After is commonly hours (57733s on
+// 2026-11-04), far past the abuse block's window; anything above a day is
+// treated as a day so a misreported header cannot retire the pool forever.
+const maxFreeUsageBlockTTL = 24 * time.Hour
+
+// freeUsageBlockTTL is the retirement window for an exit whose free allowance
+// is spent. It honors the upstream Retry-After and falls back to the standard
+// abuse block when the header is missing or unreadable.
+func (g *Gateway) freeUsageBlockTTL(retryAfter string) time.Duration {
+	if d := parseRetryAfter(retryAfter); d > 0 {
+		return min(d, maxFreeUsageBlockTTL)
+	}
+	return g.freeTierBlockTTL()
+}
+
 // abuseProbeLimit bounds how much of a 403 body is read to classify it.
 const abuseProbeLimit = 16 << 10
 
@@ -75,6 +91,16 @@ func isNetworkAbuseBlock(status int, body []byte) bool {
 	}
 	return strings.Contains(text, "free models aren't available") &&
 		strings.Contains(text, "from your current network")
+}
+
+// isFreeUsageLimitBody reports the free tier's quota refusal, HTTP 429
+// {"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage
+// limit reached..."}}. That limit is metered per egress address for hours, not
+// per conversation session, so rotating the session cannot clear it.
+func isFreeUsageLimitBody(body []byte) bool {
+	text := strings.ToLower(string(body))
+	return strings.Contains(text, "freeusagelimiterror") ||
+		strings.Contains(text, "free usage limit reached")
 }
 
 // peekResponseBody reads the start of a response body and puts it back in
