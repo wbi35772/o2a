@@ -41,7 +41,8 @@ RUN apk add --no-cache ca-certificates su-exec tzdata jq yq-go \
     && mkdir -p /app /var/lib/opencode2api \
     && chown -R opencode2api:opencode2api /app /var/lib/opencode2api
 
-COPY --from=builder /out/opencode2api /usr/local/bin/opencode2api
+COPY --from=builder /out/opencode2api /usr/local/bin/opencode2api-app
+COPY --chmod=0755 opencode2api-wrapper.sh /usr/local/bin/opencode2api
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 COPY --chmod=0755 cfnew-sidecar.sh /usr/local/bin/cfnew-sidecar
 COPY --chown=opencode2api:opencode2api config.example.json /app/config.example.json

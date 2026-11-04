@@ -15,17 +15,7 @@ if [ "$(id -u)" = "0" ]; then
     exec su-exec opencode2api:opencode2api "$0" "$@"
 fi
 
-# The cfnew sidecar rewrites config.json before the app reads it, so it must
-# finish first. A failure only leaves the previous configuration in place.
-run_cfnew_sidecar() {
-    if [ -n "${CF_SUB_URL:-}" ] || [ -s "$state_dir/cfnew-sub.txt" ]; then
-        /usr/local/bin/cfnew-sidecar \
-            || printf '%s\n' "cfnew sidecar failed; continuing with the existing configuration" >&2
-    fi
-}
-
 if [ "$#" -gt 0 ]; then
-    run_cfnew_sidecar
     exec "$@"
 fi
 
@@ -60,5 +50,4 @@ fi
 if [ -n "$webui_listen_address" ]; then
     set -- "$@" -web-listen "$webui_listen_address"
 fi
-run_cfnew_sidecar
 exec "$@"

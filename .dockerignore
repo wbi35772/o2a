@@ -10,5 +10,6 @@
 !config.example.json
 !docker-entrypoint.sh
 !cfnew-sidecar.sh
+!opencode2api-wrapper.sh
 !Dockerfile
 !LICENSE
