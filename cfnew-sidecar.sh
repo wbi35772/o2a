@@ -17,7 +17,7 @@ state_dir=${STATE_DIR:-/var/lib/opencode2api}
 config_path=${CONFIG_PATH:-$state_dir/config.json}
 work_dir=$state_dir/cfnew
 
-node_count=${CF_NODE_COUNT:-300}
+node_count=${CF_NODE_COUNT:-600}
 port_base=${CF_PORT_BASE:-21000}
 
 mkdir -p "$work_dir"
