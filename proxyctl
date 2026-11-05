@@ -226,20 +226,44 @@ start_mihomo() {
 write_config() {
     config_path=${CONFIG_PATH:-$state_dir/config.json}
     [ -f "$config_path" ] || return 0
-    # Farm mode (marker file warp-farm.txt): the subscription listeners are
-    # only registration routes, so every new WARP device is minted from a
-    # different source address and gets a fresh egress /64. The data plane
-    # stays on WARP, so proxies and proxyfile stay empty.
-    if [ -f "$state_dir/warp-farm.txt" ]; then
-        jq --rawfile pf "$work_dir/proxies.txt" \
-            '.warp.registration_proxies = ($pf | split("\n") | map(select(length > 0) | split("#")[0]))
-             | .warp.enabled = true | .proxies = [] | .proxyfile = ""' \
-            "$config_path" > "$config_path.tmp" && mv "$config_path.tmp" "$config_path"
-        return 0
+    mode=${CF_EGRESS_MODE:-}
+    if [ -z "$mode" ] && [ -f "$state_dir/warp-farm.txt" ]; then
+        # Legacy marker: subscription listeners only mint WARP devices and the
+        # data plane stays on WARP. Explicit modes below replace it.
+        mode=warp-only
     fi
-    jq --arg pf "$work_dir/proxies.txt" \
-        '.warp.enabled = false | .proxies = [] | .proxyfile = $pf' \
-        "$config_path" > "$config_path.tmp" && mv "$config_path.tmp" "$config_path"
+    case "$mode" in
+        direct)
+            # No proxy fleet and no WARP: everything uses the container egress.
+            jq '.warp.enabled = false | .warp.registration_proxies = []
+                | .proxies = [] | .proxyfile = ""' \
+                "$config_path" > "$config_path.tmp" && mv "$config_path.tmp" "$config_path"
+            ;;
+        warp-only)
+            # The fleet is registration-only: every new WARP device is minted
+            # through a different listener, so WARP carries all traffic and no
+            # proxyfile is loaded.
+            jq --rawfile pf "$work_dir/proxies.txt" \
+                '.warp.registration_proxies = ($pf | split("\n") | map(select(length > 0) | split("#")[0]))
+                 | .warp.enabled = true | .proxies = [] | .proxyfile = ""' \
+                "$config_path" > "$config_path.tmp" && mv "$config_path.tmp" "$config_path"
+            ;;
+        warp)
+            # Free-model traffic uses WARP; keyed Go/paid traffic keeps the
+            # proxy fleet.
+            jq --arg pf "$work_dir/proxies.txt" \
+                '.warp.enabled = true | .warp.registration_proxies = []
+                 | .proxies = [] | .proxyfile = $pf' \
+                "$config_path" > "$config_path.tmp" && mv "$config_path.tmp" "$config_path"
+            ;;
+        *)
+            # proxy: the whole gateway uses the fleet and WARP stays off.
+            jq --arg pf "$work_dir/proxies.txt" \
+                '.warp.enabled = false | .warp.registration_proxies = []
+                 | .proxies = [] | .proxyfile = $pf' \
+                "$config_path" > "$config_path.tmp" && mv "$config_path.tmp" "$config_path"
+            ;;
+    esac
 }
 
 do_apply() {
@@ -265,6 +289,11 @@ do_sync() {
 case "${1:-start}" in
     sync) do_sync ;;
     apply) do_apply ;;
+    mode)
+        # An explicit mode switch supersedes the legacy farm marker.
+        rm -f "$state_dir/warp-farm.txt"
+        write_config
+        ;;
     start)
         if [ -s "$merged_file" ]; then
             do_apply || do_sync

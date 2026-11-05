@@ -37,6 +37,32 @@ const quotaText = () => ({
 
 const quotaTone = { ok: "ok", limited: "warn", blocked: "bad", error: "warn", unknown: "" };
 
+const egressText = () => ({
+  proxy: t("代理池（全部流量）", "proxy.mode.proxy"),
+  warp: t("WARP（仅免费模型）", "proxy.mode.warp"),
+  "warp-only": t("WARP（免费模型，其余直连）", "proxy.mode.warpOnly"),
+  direct: t("直连（不使用代理）", "proxy.mode.direct"),
+});
+
+const egressNote = () => ({
+  proxy: t("免费模型和 Go/付费流量都走代理池。", "proxy.mode.note.proxy"),
+  warp: t("免费模型走内置 WARP，Go/付费流量走代理池。", "proxy.mode.note.warp"),
+  "warp-only": t("免费模型走内置 WARP；其余流量直连，不使用代理池。", "proxy.mode.note.warpOnly"),
+  direct: t("全部流量直连，不使用 WARP 和代理池。", "proxy.mode.note.direct"),
+});
+
+function currentEgressMode() {
+  return state.store?.settings?.egress_mode || "proxy";
+}
+
+function renderEgressMode() {
+  const mode = currentEgressMode();
+  $("#proxy-egress-mode").value = mode;
+  $("#proxy-mode-current").textContent = egressText()[mode] || mode;
+  $("#proxy-mode-note").textContent = egressNote()[mode] || "";
+}
+
+
 function quotaLabel(node) {
   const label = quotaText()[node.quota] || node.quota || "—";
   const retry = Number(node.retry_after_seconds) || 0;
@@ -167,6 +193,7 @@ function renderSettings() {
   $("#proxy-test-url").value = settings.test_url;
   $("#proxy-timeout").value = settings.test_timeout_seconds;
   $("#proxy-auto-select").checked = Boolean(settings.auto_select_healthy);
+  renderEgressMode();
 }
 
 function renderNodes() {
@@ -271,6 +298,28 @@ function renderCFSources() {
   for (const source of sources) {
     const edit = el("button", { type: "button", class: "btn btn-sm btn-ghost", text: t("编辑", "common.edit") });
     edit.addEventListener("click", () => fillCFForm(source));
+    const scan = el("button", { type: "button", class: "btn btn-sm btn-ghost", text: t("优选 IP", "cf.scan") });
+    scan.addEventListener("click", async () => {
+      scan.disabled = true;
+      const label = scan.textContent;
+      scan.textContent = t("扫描中…", "cf.scanning");
+      try {
+        const result = await api(`/api/proxy/cf/${source.id}/scan`, {
+          method: "POST",
+          body: JSON.stringify({ candidates: 200, timeout_ms: 1500, keep: 8 }),
+        });
+        const best = result.report?.hits?.[0]?.latency_ms;
+        const suffix = best == null ? "" : `，最佳 ${best} ms`;
+        const tail = result.sync_started ? "；已自动同步" : "；同步订阅后生效";
+        toast(t(`优选完成：${result.report.reachable} 个可用${suffix}${tail}`, "toast.cf.scanned", result.report.reachable, best ?? "—"));
+        await loadStore();
+      } catch (error) {
+        toast(error.message, true);
+      } finally {
+        scan.disabled = false;
+        scan.textContent = label;
+      }
+    });
     const rebuild = el("button", { type: "button", class: "btn btn-sm btn-ghost", text: t("生成", "cf.rebuild") });
     rebuild.addEventListener("click", async () => {
       rebuild.disabled = true;
@@ -303,7 +352,7 @@ function renderCFSources() {
         el("td", { class: "num", text: String(source.node_count || 0) }),
         el("td", { text: source.last_build ? localTime(source.last_build) : "—" }),
         el("td", { text: source.last_error || "—" }),
-        el("td", {}, [edit, rebuild, remove]),
+        el("td", {}, [edit, scan, rebuild, remove]),
       ]),
     );
   }
@@ -431,12 +480,32 @@ async function saveSettings(event) {
         test_url: $("#proxy-test-url").value.trim(),
         test_timeout_seconds: Number($("#proxy-timeout").value),
         auto_select_healthy: $("#proxy-auto-select").checked,
+        egress_mode: $("#proxy-egress-mode").value,
       }),
     });
     toast(t("设置已保存", "toast.proxy.settings"));
     await loadStore();
   } catch (error) {
     toast(error.message, true);
+  }
+}
+
+async function applyEgressMode() {
+  const button = $("#proxy-mode-apply");
+  const mode = $("#proxy-egress-mode").value;
+  button.disabled = true;
+  try {
+    const result = await api("/api/proxy/egress-mode", {
+      method: "PUT",
+      body: JSON.stringify({ mode }),
+    });
+    if (result.changed === false) toast(t("出口方式未变化", "toast.proxy.modeSame"));
+    else toast(t("正在切换出口方式…", "toast.proxy.modeSwitching"));
+    await refreshAll();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -500,6 +569,7 @@ function bind() {
       saveCFSource();
     });
   $("#proxy-settings-save").addEventListener("click", saveSettings);
+  $("#proxy-mode-apply").addEventListener("click", applyEgressMode);
   $("#proxy-provider-add").addEventListener("click", addProvider);
   $("#proxy-prev").addEventListener("click", () => {
     if (state.page > 1) {

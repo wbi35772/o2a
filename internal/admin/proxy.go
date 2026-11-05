@@ -78,6 +78,34 @@ type ProxySettings struct {
 	TestURL           string `json:"test_url"`
 	TestTimeoutSec    int    `json:"test_timeout_seconds"`
 	AutoSelectHealthy bool   `json:"auto_select_healthy"`
+	EgressMode        string `json:"egress_mode"`
+}
+
+// Egress modes pick which route carries free-model traffic. proxy and warp
+// split the lanes; warp-only and direct leave no proxy fleet at all.
+const (
+	EgressModeProxy    = "proxy"
+	EgressModeWarp     = "warp"
+	EgressModeWarpOnly = "warp-only"
+	EgressModeDirect   = "direct"
+)
+
+// normalizeEgressMode returns the canonical mode name. An unknown or empty
+// value is rejected for an explicit switch and falls back to proxy when read
+// from an older state file.
+func normalizeEgressMode(mode string) (string, bool) {
+	switch strings.TrimSpace(mode) {
+	case EgressModeProxy:
+		return EgressModeProxy, true
+	case EgressModeWarp:
+		return EgressModeWarp, true
+	case EgressModeWarpOnly:
+		return EgressModeWarpOnly, true
+	case EgressModeDirect:
+		return EgressModeDirect, true
+	default:
+		return "", false
+	}
 }
 
 // ProxyJob reports the single background job the proxy center runs.
@@ -127,6 +155,7 @@ func defaultProxySettings() ProxySettings {
 		TestURL:           "https://opencode.ai/",
 		TestTimeoutSec:    8,
 		AutoSelectHealthy: false,
+		EgressMode:        EgressModeProxy,
 	}
 }
 
@@ -244,7 +273,15 @@ func (a *Server) writeProvidersFile(store ProxyStore) error {
 
 // writeSettingsFile renders the sampling settings the sidecar reads.
 func (a *Server) writeSettingsFile(store ProxyStore) error {
-	text := fmt.Sprintf("CF_NODE_COUNT=%d\nCF_PORT_BASE=%d\n", store.Settings.NodeCount, store.Settings.PortBase)
+	mode, ok := normalizeEgressMode(store.Settings.EgressMode)
+	if !ok {
+		mode = EgressModeProxy
+	}
+	text := fmt.Sprintf("CF_NODE_COUNT=%d\nCF_PORT_BASE=%d\nCF_EGRESS_MODE=%s\n",
+		store.Settings.NodeCount, store.Settings.PortBase, mode)
+	if err := os.MkdirAll(a.proxyDir(), 0o700); err != nil {
+		return err
+	}
 	return writePrivateFile(filepath.Join(a.proxyDir(), "settings.env"), []byte(text))
 }
 
@@ -479,7 +516,11 @@ func truncateText(text string, limit int) string {
 func (a *Server) runProxyctl(ctx context.Context, action string) (string, error) {
 	cmd := exec.CommandContext(ctx, proxyctlPath(), action)
 	cmd.Dir = a.proxyDir()
-	cmd.Env = append(os.Environ(), "CF_STATE_DIR="+a.proxyDir())
+	cmd.Env = append(os.Environ(),
+		"STATE_DIR="+a.stateDir,
+		"CONFIG_PATH="+filepath.Join(a.stateDir, "config.json"),
+		"PROXY_WORK_DIR="+a.proxyWorkDir(),
+	)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -676,15 +717,118 @@ func (a *Server) handleProxySettings(w http.ResponseWriter, r *http.Request) {
 	if body.TestTimeoutSec < 1 || body.TestTimeoutSec > 60 {
 		body.TestTimeoutSec = 8
 	}
+	requested := strings.TrimSpace(body.EgressMode)
+	if requested != "" {
+		mode, ok := normalizeEgressMode(requested)
+		if !ok {
+			writeAdminError(w, http.StatusBadRequest, "invalid_mode", "出口方式无效")
+			return
+		}
+		body.EgressMode = mode
+	}
 	a.proxyMu.Lock()
 	defer a.proxyMu.Unlock()
 	store := a.loadProxyStore()
+	if body.EgressMode == "" {
+		// Older UI clients do not send the field; keep the current mode instead
+		// of silently resetting the gateway to the proxy pool.
+		if current, ok := normalizeEgressMode(store.Settings.EgressMode); ok {
+			body.EgressMode = current
+		} else {
+			body.EgressMode = EgressModeProxy
+		}
+	}
 	store.Settings = body
 	if err := a.saveProxyStore(store); err != nil {
 		writeAdminError(w, http.StatusInternalServerError, "save_failed", err.Error())
 		return
 	}
+	if err := a.writeSettingsFile(store); err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "save_failed", err.Error())
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"settings": body})
+}
+
+// handleProxyEgressMode switches which route carries the gateway traffic. The
+// sidecar settings file is written first so proxyctl sees the new mode, then the
+// mode job rewrites config.json and reloads the gateway.
+func (a *Server) handleProxyEgressMode(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_body", "请求体无效")
+		return
+	}
+	mode, ok := normalizeEgressMode(body.Mode)
+	if !ok {
+		writeAdminError(w, http.StatusBadRequest, "invalid_mode", "出口方式无效")
+		return
+	}
+	a.proxyMu.Lock()
+	store := a.loadProxyStore()
+	previous, ok := normalizeEgressMode(store.Settings.EgressMode)
+	if !ok {
+		previous = EgressModeProxy
+	}
+	if previous == mode {
+		a.proxyMu.Unlock()
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"mode": mode, "changed": false})
+		return
+	}
+	store.Settings.EgressMode = mode
+	if err := a.saveProxyStore(store); err != nil {
+		a.proxyMu.Unlock()
+		writeAdminError(w, http.StatusInternalServerError, "save_failed", err.Error())
+		return
+	}
+	if err := a.writeSettingsFile(store); err != nil {
+		store.Settings.EgressMode = previous
+		_ = a.saveProxyStore(store)
+		_ = a.writeSettingsFile(store)
+		a.proxyMu.Unlock()
+		writeAdminError(w, http.StatusInternalServerError, "save_failed", err.Error())
+		return
+	}
+	err := a.startProxyJob("mode", func(ctx context.Context) (string, error) {
+		out, runErr := a.runProxyctl(ctx, "mode")
+		if runErr != nil {
+			a.restoreEgressMode(previous)
+			return out, runErr
+		}
+		if _, reloadErr := a.manager.Reload(); reloadErr != nil {
+			a.restoreEgressMode(previous)
+			return out, fmt.Errorf("出口方式已写入，但网关重载失败: %w", reloadErr)
+		}
+		return fmt.Sprintf("已切换到 %s 出口", mode), nil
+	})
+	if err != nil {
+		store.Settings.EgressMode = previous
+		_ = a.saveProxyStore(store)
+		_ = a.writeSettingsFile(store)
+		a.proxyMu.Unlock()
+		writeAdminError(w, http.StatusConflict, "proxy_busy", err.Error())
+		return
+	}
+	a.proxyMu.Unlock()
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
+		"mode": mode, "previous": previous, "started": true,
+	})
+}
+
+// restoreEgressMode rolls the persisted settings and config.json back to the
+// previous mode after a failed switch.
+func (a *Server) restoreEgressMode(mode string) {
+	a.proxyMu.Lock()
+	store := a.loadProxyStore()
+	store.Settings.EgressMode = mode
+	_ = a.saveProxyStore(store)
+	_ = a.writeSettingsFile(store)
+	a.proxyMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, _ = a.runProxyctl(ctx, "mode")
 }
 
 // handleProxySelect persists the selected names and rebuilds the listeners,

@@ -131,3 +131,51 @@ curl -sS -b cookie https://<service-url>/api/proxy | jq .settings
 - 因此 `/v1/chat/completions` 仍会返回 `503 all proxies are unavailable`；
   功能链路本身可用，缺的是**未被烧的出口**（自建 WARP / 独立账号 Workers / 住宅代理），
   接入后在「Cloudflare 出口」里加一行出口参数并重新探测即可。
+
+## 9. 自建优选 IP（边缘入口扫描）
+
+面板里每个 Cloudflare 出口行都有「优选 IP」按钮，`POST /api/proxy/cf/{id}/scan`，
+不再依赖社区整理的 `bestcf` 列表。
+
+流程（`internal/edgescan`）：
+
+1. 从 Cloudflare 官方公布的 15 个 IPv4 段随机采样，按 /24 去重；
+2. 对每个候选做 TCP 443 + TLS 握手，SNI 固定为 Worker 主机名；
+3. 复用已部署 Worker 的验收口径：`GET /version?uuid=<UUID>` 必须 200 且 body 含 `Version`；
+4. 按握手+响应耗时排序，保留最快 N 个，写回该出口的 `edge` 并重建 manifest；
+5. 扫描成功后自动触发一次 `sync`，新入口立即进入 fleet（有任务在跑时返回 `sync_started=false`）。
+
+请求体与默认值：
+
+```json
+{"candidates": 200, "timeout_ms": 1500, "keep": 8}
+```
+
+- `candidates`：1–1000，默认 200；每个 /24 只保留一个样本，避免同一个 anycast 集群刷屏。
+- `timeout_ms`：500–5000，默认 1500；单地址上限，200 个候选在 32 并发下约 10 秒完成。
+- `keep`：1–32，默认 8；按延迟升序写入 `edge`。
+
+返回：
+
+```json
+{"source": {...}, "report": {"attempted": 200, "reachable": 37, "duration_ms": 8123,
+ "hits": [{"ip": "104.16.x.x", "latency_ms": 42}]}, "sync_started": true}
+```
+
+注意：优选 IP 只优化**入口**（延迟与可达性），不改变免费额度的归属；额度仍按 Worker
+`/proxyip=`、`/socks5=` 决定的**出口 IP** 计算。入口再好也不能把已烧的出口救回来。
+
+## 10. 出口方式（代理池 / WARP / 直连）
+
+代理中心顶部有「出口方式」选择器，`PUT /api/proxy/egress-mode`，四种互斥模式：
+
+| 模式 | 免费模型 | Go / 付费 | config.json 结果 |
+| --- | --- | --- | --- |
+| `proxy` | 代理池 | 代理池 | `warp.enabled=false`，`proxyfile=<cfnew>/proxies.txt` |
+| `warp` | 内置 WARP | 代理池 | `warp.enabled=true`，`registration_proxies=[]`，`proxyfile` 保留 |
+| `warp-only` | 内置 WARP | 容器直连 | `warp.enabled=true`，`registration_proxies=<proxies.txt>`，`proxyfile=""` |
+| `direct` | 容器直连 | 容器直连 | `warp.enabled=false`，`registration_proxies=[]`，`proxyfile=""` |
+
+切换由 `proxyctl mode` 写 `config.json` 后同步 `Reload`；写入失败会回滚到上一个模式。
+旧的 `warp-farm.txt` 标记仍然兼容（无显式模式时等价 `warp-only`），但显式切换会删除该标记。
+

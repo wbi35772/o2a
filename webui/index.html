@@ -850,6 +850,25 @@
               </div>
               <div id="proxy-cards" class="facts"></div>
               <p id="proxy-status" class="section-caption" role="status"></p>
+              <div class="form-grid">
+                <div class="field">
+                  <label for="proxy-egress-mode" data-i18n="proxy.mode.label">出口方式</label>
+                  <select id="proxy-egress-mode">
+                    <option value="proxy" data-i18n="proxy.mode.proxy">代理池（全部流量）</option>
+                    <option value="warp" data-i18n="proxy.mode.warp">WARP（仅免费模型）</option>
+                    <option value="warp-only" data-i18n="proxy.mode.warpOnly">WARP（免费模型，其余直连）</option>
+                    <option value="direct" data-i18n="proxy.mode.direct">直连（不使用代理）</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label data-i18n="proxy.mode.currentLabel">当前生效</label>
+                  <div class="actions">
+                    <span id="proxy-mode-current">—</span>
+                    <button id="proxy-mode-apply" type="button" class="btn btn-sm btn-primary" data-i18n="proxy.mode.apply">应用出口方式</button>
+                  </div>
+                </div>
+              </div>
+              <p id="proxy-mode-note" class="section-caption"></p>
             </section>
 
             <section class="section">
