@@ -28,6 +28,7 @@ import (
 // operator settings. It lives in <state dir>/proxycenter/state.json.
 type ProxyStore struct {
 	Providers []ProxyProvider `json:"providers"`
+	CFSources []CFSource      `json:"cf_sources,omitempty"`
 	Nodes     []ProxyNode     `json:"nodes"`
 	Settings  ProxySettings   `json:"settings"`
 	SyncedAt  string          `json:"synced_at,omitempty"`
@@ -60,6 +61,13 @@ type ProxyNode struct {
 	LastTest   string `json:"last_test,omitempty"`
 	LastError  string `json:"last_error,omitempty"`
 	Selected   bool   `json:"selected"`
+	// EgressIP and Quota are filled by the quota probe: which public address
+	// this listener presents and whether that address still has free quota.
+	EgressIP       string `json:"egress_ip,omitempty"`
+	Quota          string `json:"quota,omitempty"`
+	QuotaNote      string `json:"quota_note,omitempty"`
+	QuotaCheckedAt string `json:"quota_checked_at,omitempty"`
+	RetryAfter     int64  `json:"retry_after_seconds,omitempty"`
 }
 
 // ProxySettings controls how the sidecar samples nodes and how the tester
@@ -94,6 +102,11 @@ type proxyRuntime struct {
 	Unknown      int            `json:"unknown"`
 	Statuses     map[string]int `json:"statuses"`
 	Selected     int            `json:"selected"`
+	QuotaOK      int            `json:"quota_ok"`
+	QuotaLimited int            `json:"quota_limited"`
+	QuotaBlocked int            `json:"quota_blocked"`
+	QuotaError   int            `json:"quota_error"`
+	QuotaUnknown int            `json:"quota_unknown"`
 	LastSync     string         `json:"last_sync,omitempty"`
 	LastSyncFail string         `json:"last_sync_error,omitempty"`
 }
@@ -122,14 +135,28 @@ func (a *Server) proxyDir() string {
 	return filepath.Join(a.stateDir, "proxycenter")
 }
 
+// proxyWorkDir is where the sidecar writes the fleet it generated
+// (mihomo.json, proxies.txt, its log). proxyctl defaults it to
+// <state>/cfnew and honours PROXY_WORK_DIR, so read the same value here
+// instead of assuming the proxy-center directory.
+func (a *Server) proxyWorkDir() string {
+	if dir := strings.TrimSpace(os.Getenv("PROXY_WORK_DIR")); dir != "" {
+		return dir
+	}
+	return filepath.Join(a.stateDir, "cfnew")
+}
+
 func (a *Server) proxyStatePath() string { return filepath.Join(a.proxyDir(), "state.json") }
 
-// loadProxyStore reads state.json, filling in defaults when absent.
+// loadProxyStore reads state.json, filling in defaults when absent. When the
+// file is missing (a container recreated from a volume that only kept the
+// sidecar output, or the first boot after an upgrade) the store is rebuilt
+// from listeners.json and selected.txt so the panel shows the live fleet.
 func (a *Server) loadProxyStore() ProxyStore {
 	store := ProxyStore{Settings: defaultProxySettings()}
 	data, err := os.ReadFile(a.proxyStatePath())
 	if err != nil {
-		return store
+		return a.recoverProxyStore(store)
 	}
 	if err := json.Unmarshal(data, &store); err != nil {
 		return ProxyStore{Settings: defaultProxySettings()}
@@ -145,6 +172,32 @@ func (a *Server) loadProxyStore() ProxyStore {
 	}
 	if store.Settings.TestTimeoutSec <= 0 {
 		store.Settings.TestTimeoutSec = 8
+	}
+	return store
+}
+
+// recoverProxyStore rebuilds the in-memory store from what the sidecar left on
+// disk: listeners.json describes the current fleet, selected.txt the names the
+// gateway actually uses, and cfnew-sub.txt the legacy subscription list.
+func (a *Server) recoverProxyStore(store ProxyStore) ProxyStore {
+	listeners := a.readListeners()
+	if len(listeners) == 0 {
+		return store
+	}
+	mergeListeners(&store, listeners, a.readSelected())
+	if data, err := os.ReadFile(filepath.Join(a.stateDir, "cfnew-sub.txt")); err == nil {
+		index := 0
+		for _, line := range strings.Split(string(data), "\n") {
+			url := strings.TrimSpace(line)
+			if url == "" || strings.HasPrefix(url, "#") {
+				continue
+			}
+			index++
+			store.Providers = append(store.Providers, ProxyProvider{
+				ID: fmt.Sprintf("p%d", index), Name: fmt.Sprintf("subscription %d", index),
+				URL: url, Enabled: true, LastFetch: store.SyncedAt,
+			})
+		}
 	}
 	return store
 }
@@ -266,6 +319,9 @@ func mergeListeners(store *ProxyStore, listeners []proxyListener, selected map[s
 		if old, ok := previous[item.Name]; ok {
 			node.Status, node.LatencyMs = old.Status, old.LatencyMs
 			node.LastTest, node.LastError = old.LastTest, old.LastError
+			node.EgressIP, node.Quota = old.EgressIP, old.Quota
+			node.QuotaNote, node.QuotaCheckedAt = old.QuotaNote, old.QuotaCheckedAt
+			node.RetryAfter = old.RetryAfter
 		}
 		nodes = append(nodes, node)
 	}
@@ -284,7 +340,12 @@ func (a *Server) proxyRuntime(store ProxyStore) proxyRuntime {
 		}
 	}
 	rt.Listeners = len(store.Nodes)
-	if data, err := os.ReadFile(filepath.Join(a.proxyDir(), "proxies.txt")); err == nil {
+	// proxyctl writes the fleet to its work directory, not to proxycenter.
+	proxyFile := filepath.Join(a.proxyWorkDir(), "proxies.txt")
+	if _, err := os.Stat(proxyFile); err != nil {
+		proxyFile = filepath.Join(a.proxyDir(), "proxies.txt")
+	}
+	if data, err := os.ReadFile(proxyFile); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			if strings.TrimSpace(line) != "" && !strings.HasPrefix(strings.TrimSpace(line), "#") {
 				rt.ProxyFile++
@@ -306,6 +367,18 @@ func (a *Server) proxyRuntime(store ProxyStore) proxyRuntime {
 		if node.Selected {
 			rt.Selected++
 		}
+		switch node.Quota {
+		case "ok":
+			rt.QuotaOK++
+		case "limited":
+			rt.QuotaLimited++
+		case "blocked":
+			rt.QuotaBlocked++
+		case "error":
+			rt.QuotaError++
+		default:
+			rt.QuotaUnknown++
+		}
 	}
 	return rt
 }
@@ -315,15 +388,16 @@ func (a *Server) handleProxyState(w http.ResponseWriter, _ *http.Request) {
 	a.proxyJobMu.Lock()
 	job := a.proxyJob
 	a.proxyJobMu.Unlock()
-	a.proxyMu.Lock()
+	a.proxyMu.RLock()
 	store := a.loadProxyStore()
-	a.proxyMu.Unlock()
+	a.proxyMu.RUnlock()
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"providers": store.Providers,
-		"settings":  store.Settings,
-		"runtime":   a.proxyRuntime(store),
-		"job":       job,
+		"providers":  store.Providers,
+		"cf_sources": store.CFSources,
+		"settings":   store.Settings,
+		"runtime":    a.proxyRuntime(store),
+		"job":        job,
 	})
 }
 
@@ -341,9 +415,9 @@ func (a *Server) handleProxyNodes(w http.ResponseWriter, r *http.Request) {
 	if size < 1 || size > 200 {
 		size = 50
 	}
-	a.proxyMu.Lock()
+	a.proxyMu.RLock()
 	store := a.loadProxyStore()
-	a.proxyMu.Unlock()
+	a.proxyMu.RUnlock()
 	filtered := make([]ProxyNode, 0, len(store.Nodes))
 	for _, node := range store.Nodes {
 		if status != "" && status != "all" && node.Status != status {
@@ -474,9 +548,7 @@ func (a *Server) startProxyJob(action string, fn func(context.Context) (string, 
 		return err
 	}
 	go func() {
-		a.proxyMu.Lock()
-		defer a.proxyMu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 		out, err := fn(ctx)
 		a.finishProxyJob(out, err)
@@ -956,7 +1028,11 @@ func (a *Server) handleProxyLogs(w http.ResponseWriter, r *http.Request) {
 	if limit < 20 || limit > 2000 {
 		limit = 300
 	}
-	data, err := os.ReadFile(filepath.Join(a.proxyDir(), "mihomo.log"))
+	logPath := filepath.Join(a.proxyWorkDir(), "mihomo.log")
+	if _, err := os.Stat(logPath); err != nil {
+		logPath = filepath.Join(a.proxyDir(), "mihomo.log")
+	}
+	data, err := os.ReadFile(logPath)
 	if err != nil {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"lines": []string{}})
 		return
@@ -980,6 +1056,9 @@ func (a *Server) handleProxyExport(w http.ResponseWriter, r *http.Request) {
 		contentType = "text/yaml"
 	}
 	data, err := os.ReadFile(filepath.Join(a.proxyDir(), name))
+	if err != nil && name == "mihomo.yaml" {
+		data, err = os.ReadFile(filepath.Join(a.proxyWorkDir(), name))
+	}
 	if err != nil {
 		writeAdminError(w, http.StatusNotFound, "not_found", "尚无导出内容，请先同步")
 		return

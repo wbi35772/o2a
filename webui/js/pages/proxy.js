@@ -15,6 +15,7 @@ const state = {
   selected: new Set(),
   timer: null,
   panel: "nodes",
+  cfEditing: "",
 };
 
 const statusText = () => ({
@@ -26,12 +27,30 @@ const statusText = () => ({
 
 const statusTone = { alive: "ok", limited: "warn", dead: "bad", unknown: "" };
 
+const quotaText = () => ({
+  ok: t("可用", "proxy.quota.ok"),
+  limited: t("已限额", "proxy.quota.limited"),
+  blocked: t("被封", "proxy.quota.blocked"),
+  error: t("探测失败", "proxy.quota.error"),
+  unknown: t("未探测", "proxy.quota.unknown"),
+});
+
+const quotaTone = { ok: "ok", limited: "warn", blocked: "bad", error: "warn", unknown: "" };
+
+function quotaLabel(node) {
+  const label = quotaText()[node.quota] || node.quota || "—";
+  const retry = Number(node.retry_after_seconds) || 0;
+  if (retry > 0 && node.quota !== "ok") return `${label} · ${Math.ceil(retry / 3600)}h`;
+  return label;
+}
+
 async function loadStore() {
   const store = await api("/api/proxy");
   if (!hasSession()) return;
   state.store = store;
   renderOverview();
   renderProviders();
+  renderCFSources();
   renderSettings();
   scheduleJobPoll();
 }
@@ -146,7 +165,7 @@ function renderSettings() {
   $("#proxy-node-count").value = settings.node_count;
   $("#proxy-port-base").value = settings.port_base;
   $("#proxy-test-url").value = settings.test_url;
-  $("#proxy-timeout").value = settings.test_timeout_sec;
+  $("#proxy-timeout").value = settings.test_timeout_seconds;
   $("#proxy-auto-select").checked = Boolean(settings.auto_select_healthy);
 }
 
@@ -182,6 +201,12 @@ function renderNodes() {
         el("td", { text: node.type }),
         el("td", { class: "mono", text: `${node.server}:${node.port}` }),
         el("td", { class: "num", text: node.listen_port ? String(node.listen_port) : "—" }),
+        el("td", { class: "mono", text: node.egress_ip || "—" }),
+        el("td", {
+          class: `proxy-state ${quotaTone[node.quota] || ""}`,
+          text: quotaLabel(node),
+          title: node.quota_note || "",
+        }),
         el("td", { class: `proxy-state ${tone[node.status] || ""}`, text: labels[node.status] || node.status }),
         el("td", { class: "num", text: node.latency_ms ? `${node.latency_ms} ms` : "—" }),
         el("td", { text: node.last_test ? localTime(node.last_test) : "—" }),
@@ -189,7 +214,7 @@ function renderNodes() {
       ]),
     );
   }
-  if (!state.nodes.length) emptyRow(body, 10, t("没有符合条件的节点", "proxy.noNodes"));
+  if (!state.nodes.length) emptyRow(body, 12, t("没有符合条件的节点", "proxy.noNodes"));
   const pages = Math.max(1, Math.ceil(state.total / state.size));
   $("#proxy-page").textContent = `${state.page} / ${pages} · ${state.total}`;
   $("#proxy-prev").disabled = state.page <= 1;
@@ -231,6 +256,157 @@ async function testSelection(allMatching) {
   }
 }
 
+function splitLines(value) {
+  return value
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function renderCFSources() {
+  const body = $("#cf-sources");
+  if (!body) return;
+  body.replaceChildren();
+  const sources = state.store?.cf_sources || [];
+  for (const source of sources) {
+    const edit = el("button", { type: "button", class: "btn btn-sm btn-ghost", text: t("编辑", "common.edit") });
+    edit.addEventListener("click", () => fillCFForm(source));
+    const rebuild = el("button", { type: "button", class: "btn btn-sm btn-ghost", text: t("生成", "cf.rebuild") });
+    rebuild.addEventListener("click", async () => {
+      rebuild.disabled = true;
+      try {
+        await api(`/api/proxy/cf/${source.id}/build`, { method: "POST", body: "{}" });
+        toast(t("节点文件已重新生成", "toast.cf.built"));
+        await loadStore();
+      } catch (error) {
+        toast(error.message, true);
+      } finally {
+        rebuild.disabled = false;
+      }
+    });
+    const remove = el("button", { type: "button", class: "btn btn-sm btn-ghost", text: t("删除", "common.delete") });
+    remove.addEventListener("click", async () => {
+      if (!confirm(t(`删除出口源「${source.name}」？`, "cf.confirmDelete", source.name))) return;
+      try {
+        await api(`/api/proxy/cf/${source.id}`, { method: "DELETE" });
+        if (state.cfEditing === source.id) resetCFForm();
+        await loadStore();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    });
+    body.append(
+      el("tr", {}, [
+        el("td", { text: source.name }),
+        el("td", { class: "mono proxy-url", text: source.host }),
+        el("td", { class: "num", text: String((source.egress || []).length) }),
+        el("td", { class: "num", text: String(source.node_count || 0) }),
+        el("td", { text: source.last_build ? localTime(source.last_build) : "—" }),
+        el("td", { text: source.last_error || "—" }),
+        el("td", {}, [edit, rebuild, remove]),
+      ]),
+    );
+  }
+  if (!sources.length) emptyRow(body, 7, t("还没有 Cloudflare 出口源", "cf.empty"));
+}
+
+function fillCFForm(source) {
+  state.cfEditing = source.id || "";
+  $("#cf-name").value = source.name || "";
+  $("#cf-host").value = source.host || "";
+  $("#cf-uuid").value = source.uuid || "";
+  $("#cf-port").value = source.port || 443;
+  $("#cf-path").value = source.path_template || "/proxyip=<ip>";
+  $("#cf-egress").value = (source.egress || []).join("\n");
+  $("#cf-edge").value = (source.edge || []).join("\n");
+  $("#cf-enabled").checked = source.enabled !== false;
+}
+
+function resetCFForm() {
+  fillCFForm({ enabled: true, path_template: "/proxyip=<ip>", port: 443 });
+  $("#cf-deploy").value = "";
+}
+
+function cfPayload() {
+  return {
+    name: $("#cf-name").value.trim(),
+    host: $("#cf-host").value.trim(),
+    uuid: $("#cf-uuid").value.trim(),
+    port: Number($("#cf-port").value) || 443,
+    path_template: $("#cf-path").value.trim() || "/proxyip=<ip>",
+    egress: splitLines($("#cf-egress").value),
+    edge: splitLines($("#cf-edge").value),
+    enabled: $("#cf-enabled").checked,
+  };
+}
+
+async function saveCFSource() {
+  const payload = cfPayload();
+  if (!payload.name || !payload.host || !payload.uuid) {
+    toast(t("名称、Worker 域名和 UUID 都要填", "toast.cf.required"), true);
+    return;
+  }
+  try {
+    const path = state.cfEditing ? `/api/proxy/cf/${state.cfEditing}` : "/api/proxy/cf";
+    const result = await api(path, {
+      method: state.cfEditing ? "PATCH" : "POST",
+      body: JSON.stringify(payload),
+    });
+    state.cfEditing = result.id || state.cfEditing;
+    toast(t(`已生成 ${result.node_count || 0} 个节点，点「同步订阅」加载`, "toast.cf.saved", result.node_count || 0));
+    await loadStore();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function parseCFDeploy() {
+  const text = $("#cf-deploy").value.trim();
+  if (!text) {
+    toast(t("先粘贴部署参数", "toast.cf.noDeploy"), true);
+    return;
+  }
+  try {
+    const params = await api("/api/proxy/cf/parse", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    $("#cf-uuid").value = params.uuid || "";
+    $("#cf-host").value = params.host || "";
+    $("#cf-path").value = params.path_template || "/proxyip=<ip>";
+    if (!$("#cf-name").value) $("#cf-name").value = (params.host || "").split(".")[0] || "cloudflare";
+    const socks = params.socks5 || [];
+    const proxyIPs = params.proxyip || [];
+    const list = (params.path_template || "").startsWith("/socks5=") && socks.length ? socks : proxyIPs;
+    if (list.length) {
+      $("#cf-egress").value =
+        (params.path_template || "").startsWith("/socks5=")
+          ? list.map((item) => (item.startsWith("socks5://") ? item : `socks5://${item}`)).join("\n")
+          : list.join("\n");
+    }
+    toast(t("已填入解析结果", "toast.cf.parsed"));
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function probeEgress(allMatching) {
+  const body = allMatching
+    ? { status: state.status || undefined, provider: state.provider || undefined }
+    : { names: [...state.selected] };
+  if (!allMatching && !body.names.length) {
+    toast(t("先在列表里勾选节点", "toast.proxy.pickNodes"), true);
+    return;
+  }
+  try {
+    const result = await api("/api/proxy/egress", { method: "POST", body: JSON.stringify(body) });
+    toast(t(`已开始探测 ${result.targets} 个出口`, "toast.proxy.egress", result.targets));
+    await refreshAll();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
 async function applySelection(auto) {
   try {
     const result = await api("/api/proxy/select", {
@@ -253,7 +429,7 @@ async function saveSettings(event) {
         node_count: Number($("#proxy-node-count").value),
         port_base: Number($("#proxy-port-base").value),
         test_url: $("#proxy-test-url").value.trim(),
-        test_timeout_sec: Number($("#proxy-timeout").value),
+        test_timeout_seconds: Number($("#proxy-timeout").value),
         auto_select_healthy: $("#proxy-auto-select").checked,
       }),
     });
@@ -310,8 +486,19 @@ function bind() {
   $("#proxy-sync").addEventListener("click", syncSubscriptions);
   $("#proxy-test-all").addEventListener("click", () => testSelection(true));
   $("#proxy-test-picked").addEventListener("click", () => testSelection(false));
+  $("#proxy-egress-all").addEventListener("click", () => probeEgress(true));
+  $("#proxy-egress-picked").addEventListener("click", () => probeEgress(false));
   $("#proxy-apply").addEventListener("click", () => applySelection(false));
   $("#proxy-apply-auto").addEventListener("click", () => applySelection(true));
+  $("#cf-save").addEventListener("click", saveCFSource);
+  $("#cf-parse").addEventListener("click", parseCFDeploy);
+  $("#cf-reset").addEventListener("click", resetCFForm);
+  for (const id of ["cf-name", "cf-host", "cf-uuid", "cf-port", "cf-path"])
+    $(`#${id}`).addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      saveCFSource();
+    });
   $("#proxy-settings-save").addEventListener("click", saveSettings);
   $("#proxy-provider-add").addEventListener("click", addProvider);
   $("#proxy-prev").addEventListener("click", () => {

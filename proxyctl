@@ -83,29 +83,71 @@ wait_port() {
 }
 
 # fetch_providers downloads every enabled provider as Clash YAML. A failing
-# provider is reported and skipped; the sync only fails when nothing is left.
+# provider is reported and skipped; when it has a cached copy from an earlier
+# sync that copy is reused, so one unreachable subscription does not silently
+# empty the fleet. The sync only fails when nothing is left.
 fetch_providers() {
-    rm -f "$pc_dir"/sub-*.yaml "$pc_dir"/sub-*.json
+    # Drop cache files whose provider left the panel (old numeric sub-N.yaml
+    # files from before the id-based naming would otherwise stay in the merged
+    # fleet forever).
+    keep_ids=$pc_dir/.keep-ids
+    : > "$keep_ids"
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        printf '%s\n' "$line" | cut -f1 >> "$keep_ids"
+    done < "$providers_file"
+    for stale in "$pc_dir"/sub-*.yaml; do
+        [ -f "$stale" ] || continue
+        stale_id=${stale##*/sub-}
+        stale_id=${stale_id%.yaml}
+        grep -qxF "$stale_id" "$keep_ids" || rm -f "$stale" "${stale%.yaml}.json"
+    done
+    rm -f "$keep_ids"
+
     fetched=0
-    index=0
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         id=$(printf '%s' "$line" | cut -f1)
         url=$(printf '%s' "$line" | cut -f3)
         [ -n "$url" ] || continue
-        index=$((index + 1))
-        out=$pc_dir/sub-$index.yaml
-        sep='?'
+        out=$pc_dir/sub-$id.yaml
         case "$url" in
-            *\?*) sep='&' ;;
+            http://*|https://*)
+                sep='?'
+                case "$url" in
+                    *\?*) sep='&' ;;
+                esac
+                # One attempt with short timeouts: wget retries timeouts 20
+                # times by default, which made a dead provider stall the
+                # whole sync for minutes.
+                if wget -q -t 1 -T 15 --dns-timeout=10 -O "$out.tmp" -U 'clash.meta' "$url${sep}target=clash" && [ -s "$out.tmp" ]; then
+                    mv "$out.tmp" "$out"
+                    log "provider $id fetched ($(wc -c < "$out" | tr -d ' ') bytes)"
+                    fetched=$((fetched + 1))
+                else
+                    rm -f "$out.tmp"
+                    if [ -s "$out" ]; then
+                        log "provider $id failed, reusing cached copy ($(wc -c < "$out" | tr -d ' ') bytes)"
+                        fetched=$((fetched + 1))
+                    else
+                        log "provider $id failed"
+                    fi
+                fi
+                ;;
+            *)
+                # Local provider: the panel writes generated Cloudflare or
+                # imported Clash files here, so copy the file instead of
+                # fetching it.
+                if [ -s "$url" ] && cp "$url" "$out.tmp" 2>/dev/null; then
+                    mv "$out.tmp" "$out"
+                    log "provider $id loaded ($(wc -c < "$out" | tr -d ' ') bytes)"
+                    fetched=$((fetched + 1))
+                else
+                    rm -f "$out.tmp"
+                    log "provider $id missing: $url"
+                fi
+                ;;
         esac
-        if wget -q -O "$out" -T 40 -U 'clash.meta' "$url${sep}target=clash" && [ -s "$out" ]; then
-            log "provider $id fetched ($(wc -c < "$out" | tr -d ' ') bytes)"
-            fetched=$((fetched + 1))
-        else
-            rm -f "$out"
-            log "provider $id failed"
-        fi
     done < "$providers_file"
     [ "$fetched" -gt 0 ]
 }

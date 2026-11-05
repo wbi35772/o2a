@@ -20,3 +20,8 @@ coverage.out
 # Local credentials, deployment backups, and verification artifacts
 .local/
 *.availability.json
+
+# Local agent credentials
+.insta/agent-session.json
+
+.insta/.agent-session-*.tmp

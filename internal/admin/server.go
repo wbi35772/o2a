@@ -45,7 +45,7 @@ type Server struct {
 	// stateDir is the directory holding config.json, so the proxy center keeps
 	// its state, listeners and generated proxy list beside it.
 	stateDir   string
-	proxyMu    sync.Mutex
+	proxyMu    sync.RWMutex
 	proxyJobMu sync.Mutex
 	proxyJob   ProxyJob
 
@@ -108,6 +108,13 @@ func (a *Server) Handler() http.Handler {
 	mux.Handle("GET /api/proxy/logs", a.authenticate(http.HandlerFunc(a.handleProxyLogs)))
 	mux.Handle("GET /api/proxy/export", a.authenticate(http.HandlerFunc(a.handleProxyExport)))
 	mux.Handle("POST /api/proxy/import", a.authenticate(a.csrf(http.HandlerFunc(a.handleProxyImport))))
+	mux.Handle("GET /api/proxy/cf", a.authenticate(http.HandlerFunc(a.handleCFSourceList)))
+	mux.Handle("POST /api/proxy/cf", a.authenticate(a.csrf(http.HandlerFunc(a.handleCFSourceCreate))))
+	mux.Handle("POST /api/proxy/cf/parse", a.authenticate(a.csrf(http.HandlerFunc(a.handleCFParseDeploy))))
+	mux.Handle("PATCH /api/proxy/cf/{id}", a.authenticate(a.csrf(http.HandlerFunc(a.handleCFSourceUpdate))))
+	mux.Handle("DELETE /api/proxy/cf/{id}", a.authenticate(a.csrf(http.HandlerFunc(a.handleCFSourceDelete))))
+	mux.Handle("POST /api/proxy/cf/{id}/build", a.authenticate(a.csrf(http.HandlerFunc(a.handleCFSourceBuild))))
+	mux.Handle("POST /api/proxy/egress", a.authenticate(a.csrf(http.HandlerFunc(a.handleProxyEgress))))
 	mux.Handle("/", a.staticHandler())
 	return a.securityHeaders(telemetry.Recover(a.logger, mux))
 }

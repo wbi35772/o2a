@@ -855,6 +855,7 @@
             <section class="section">
               <div id="proxy-tabs" class="tabs subtabs" role="tablist" aria-label="代理中心分区">
                 <button class="tab active" type="button" data-proxy-tab="nodes" role="tab" aria-selected="true" data-i18n="proxy.tab.nodes">节点与出口</button>
+                <button class="tab" type="button" data-proxy-tab="cf" role="tab" aria-selected="false" data-i18n="proxy.tab.cf">Cloudflare 出口</button>
                 <button class="tab" type="button" data-proxy-tab="providers" role="tab" aria-selected="false" data-i18n="proxy.tab.providers">订阅</button>
                 <button class="tab" type="button" data-proxy-tab="settings" role="tab" aria-selected="false" data-i18n="proxy.tab.settings">设置</button>
                 <button class="tab" type="button" data-proxy-tab="logs" role="tab" aria-selected="false" data-i18n="proxy.tab.logs">日志</button>
@@ -880,6 +881,8 @@
                 <div class="actions">
                   <button id="proxy-test-all" type="button" class="btn btn-sm" data-i18n="proxy.testAll">测试当前筛选</button>
                   <button id="proxy-test-picked" type="button" class="btn btn-sm" data-i18n="proxy.testPicked">测试勾选</button>
+                  <button id="proxy-egress-all" type="button" class="btn btn-sm" data-i18n="proxy.egressAll">探测当前筛选额度</button>
+                  <button id="proxy-egress-picked" type="button" class="btn btn-sm" data-i18n="proxy.egressPicked">探测勾选额度</button>
                   <button id="proxy-apply" type="button" class="btn btn-sm btn-primary" data-i18n="proxy.apply">应用勾选</button>
                   <button id="proxy-apply-auto" type="button" class="btn btn-sm" data-i18n="proxy.applyAuto">只应用可用</button>
                 </div>
@@ -893,6 +896,8 @@
                         <th data-i18n="proxy.col.type">类型</th>
                         <th data-i18n="proxy.col.server">服务器</th>
                         <th class="num" data-i18n="proxy.col.port">本地端口</th>
+                        <th data-i18n="proxy.col.egress">出口 IP</th>
+                        <th data-i18n="proxy.col.quota">免费额度</th>
                         <th data-i18n="proxy.col.state">状态</th>
                         <th class="num" data-i18n="proxy.col.latency">延迟</th>
                         <th data-i18n="proxy.col.tested">最近测试</th>
@@ -906,6 +911,73 @@
                   <button id="proxy-prev" type="button" class="btn btn-sm" data-i18n="proxy.prev">上一页</button>
                   <span id="proxy-page" class="section-caption"></span>
                   <button id="proxy-next" type="button" class="btn btn-sm" data-i18n="proxy.next">下一页</button>
+                </div>
+              </div>
+
+              <div data-proxy-panel="cf" class="stack hidden" role="tabpanel">
+                <div class="stack">
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="cf-name" data-i18n="cf.name">名称</label>
+                      <input id="cf-name" placeholder="edgetunnel-full" />
+                    </div>
+                    <div class="field">
+                      <label for="cf-host" data-i18n="cf.host">Worker 域名</label>
+                      <input id="cf-host" placeholder="edgetunnel-full.wbi35772.workers.dev" />
+                    </div>
+                    <div class="field">
+                      <label for="cf-uuid" data-i18n="cf.uuid">UUID</label>
+                      <input id="cf-uuid" placeholder="00000000-0000-0000-0000-000000000000" />
+                    </div>
+                    <div class="field">
+                      <label for="cf-port" data-i18n="cf.port">端口</label>
+                      <input id="cf-port" type="number" min="1" max="65535" value="443" />
+                    </div>
+                    <div class="field full">
+                      <label for="cf-path" data-i18n="cf.path">WS 路径模板</label>
+                      <input id="cf-path" placeholder="/proxyip=&lt;ip&gt;" />
+                    </div>
+                    <div class="field full">
+                      <label for="cf-egress" data-i18n="cf.egress">出口参数（每行一个，替换路径里的 &lt;ip&gt;）</label>
+                      <textarea id="cf-egress" rows="5" placeholder="1.2.3.4:443&#10;socks5://user:pass@host:1080"></textarea>
+                    </div>
+                    <div class="field full">
+                      <label for="cf-edge" data-i18n="cf.edge">边缘 IP（可选，每行一个；留空轮询 Cloudflare 默认段）</label>
+                      <textarea id="cf-edge" rows="3" placeholder="104.18.33.247"></textarea>
+                    </div>
+                    <div class="field full">
+                      <label for="cf-deploy" data-i18n="cf.deploy">从部署参数导入（KEY=VALUE 或 JSON）</label>
+                      <textarea id="cf-deploy" rows="4" placeholder="UUID=...&#10;KEY=...&#10;HOST=...&#10;PROXYIP=1.2.3.4:443,5.6.7.8:443"></textarea>
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button id="cf-parse" type="button" class="btn btn-sm" data-i18n="cf.parse">解析部署参数</button>
+                    <button id="cf-save" type="button" class="btn btn-sm btn-primary" data-i18n="cf.save">保存并生成节点</button>
+                    <button id="cf-reset" type="button" class="btn btn-sm" data-i18n="cf.reset">新建</button>
+                  </div>
+                  <label class="check">
+                    <input id="cf-enabled" type="checkbox" checked />
+                    <span data-i18n="cf.enabled">启用（同步时拉取这个出口源）</span>
+                  </label>
+                  <p class="section-caption" data-i18n="cf.note">
+                    每个出口参数生成一个 VLESS 节点，并注册成本地订阅。保存后到「节点与出口」点同步订阅，再探测额度确认出口可用。
+                  </p>
+                </div>
+                <div class="table-wrap">
+                  <table class="table">
+                    <thead>
+                      <tr>
+                        <th data-i18n="cf.col.name">名称</th>
+                        <th data-i18n="cf.col.host">Worker</th>
+                        <th class="num" data-i18n="cf.col.egress">出口</th>
+                        <th class="num" data-i18n="cf.col.nodes">节点</th>
+                        <th data-i18n="cf.col.build">上次生成</th>
+                        <th data-i18n="cf.col.error">错误</th>
+                        <th data-i18n="cf.col.action">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="cf-sources"></tbody>
+                  </table>
                 </div>
               </div>
 
