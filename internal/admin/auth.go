@@ -9,7 +9,9 @@ import (
 	"encoding/hex"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -57,7 +59,7 @@ func (a *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := a.manager.Config()
 	usernameMatch := len(input.Username) == len(cfg.WebUI.Username) && subtle.ConstantTimeCompare([]byte(input.Username), []byte(cfg.WebUI.Username)) == 1
-	passwordMatch := config.VerifyPassword(cfg.WebUI.PasswordHash, input.Password)
+	passwordMatch := a.verifyPassword(cfg.WebUI.PasswordHash, input.Password)
 	if !usernameMatch || !passwordMatch {
 		a.recordLoginFailure(client)
 		a.logger.Warn("admin login failed", "component", "auth", "event", "login_failed", "client_ip", client)
@@ -180,6 +182,11 @@ func (a *Server) csrf(next http.Handler) http.Handler {
 // current password, then drops every session (including this one) and clears
 // the cookie, so the operator has to log in again.
 func (a *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
+	client := clientIP(r)
+	if !a.allowSensitive(client) {
+		writeAdminError(w, http.StatusTooManyRequests, "rate_limited", "too many verification attempts; try again later")
+		return
+	}
 	var input struct {
 		CurrentPassword string `json:"current_password"`
 		Username        string `json:"username"`
@@ -190,7 +197,7 @@ func (a *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := a.manager.Config()
-	if !config.VerifyPassword(cfg.WebUI.PasswordHash, input.CurrentPassword) {
+	if !a.verifyPassword(cfg.WebUI.PasswordHash, input.CurrentPassword) {
 		writeAdminError(w, http.StatusForbidden, "verification_failed", "current password is incorrect")
 		return
 	}
@@ -208,8 +215,44 @@ func (a *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	a.sessions = make(map[string]adminSession)
 	a.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1, Secure: requestIsSecure(r)})
-	a.logger.Info("admin account updated", "component", "auth", "event", "account_updated", "client_ip", clientIP(r))
+	a.logger.Info("admin account updated", "component", "auth", "event", "account_updated", "client_ip", client)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"updated": true, "reauthenticate": true})
+}
+
+// allowSensitive rate-limits password re-verification (reveal and account) to
+// five attempts per client per five minutes, counting every attempt. It uses a
+// separate window from login so neither path can exhaust the other.
+func (a *Server) allowSensitive(client string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now()
+	if len(a.sensitiveAttempts) > 4096 {
+		for address, window := range a.sensitiveAttempts {
+			if now.Sub(window.Started) > 5*time.Minute {
+				delete(a.sensitiveAttempts, address)
+			}
+		}
+	}
+	window := a.sensitiveAttempts[client]
+	if window.Started.IsZero() || now.Sub(window.Started) > 5*time.Minute {
+		window = loginWindow{Started: now}
+	}
+	if window.Count >= 5 {
+		return false
+	}
+	window.Count++
+	a.sensitiveAttempts[client] = window
+	return true
+}
+
+// verifyPassword serializes the memory-hard argon2 verification so a burst of
+// login or re-verification attempts cannot allocate 64 MiB per request at
+// once. It runs on every login, including unknown usernames, to keep the cost
+// independent of whether the username exists.
+func (a *Server) verifyPassword(hash, password string) bool {
+	a.verifyMu.Lock()
+	defer a.verifyMu.Unlock()
+	return config.VerifyPassword(hash, password)
 }
 
 // allowLogin reports whether client may try to log in: at most five failures
@@ -309,15 +352,143 @@ func tokenDigest(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// clientIP returns the IP address of the direct peer, without the port. It
-// deliberately ignores X-Forwarded-For: the header is client-controlled, so
-// trusting it would let anyone escape the login and Playground rate limits by
-// rotating a value. Behind a reverse proxy every client therefore shares the
-// proxy's address.
-func clientIP(r *http.Request) string {
+// trustedProxyPrefixes lists the peers whose X-Forwarded-For header is
+// believed. The default trusts loopback and private networks, where a reverse
+// proxy or container edge normally sits; TRUSTED_PROXIES overrides it with a
+// comma-separated CIDR list, and "none" disables the trust entirely.
+var trustedProxyPrefixes = defaultTrustedProxyPrefixes()
+
+// defaultTrustedProxyPrefixes reads TRUSTED_PROXIES or returns the private and
+// loopback ranges a container platform uses between its edge and the service.
+func defaultTrustedProxyPrefixes() []netip.Prefix {
+	if raw, ok := os.LookupEnv("TRUSTED_PROXIES"); ok && strings.TrimSpace(raw) != "" {
+		return parseTrustedProxyPrefixes(raw)
+	}
+	return []netip.Prefix{
+		netip.MustParsePrefix("127.0.0.0/8"),
+		netip.MustParsePrefix("::1/128"),
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+		netip.MustParsePrefix("169.254.0.0/16"),
+		netip.MustParsePrefix("fc00::/7"),
+		netip.MustParsePrefix("fe80::/10"),
+	}
+}
+
+// parseTrustedProxyPrefixes accepts "10.0.0.0/8, 192.168.1.7" (a bare address
+// becomes a host prefix) and ignores malformed entries. "none" yields no
+// trusted peers.
+func parseTrustedProxyPrefixes(raw string) []netip.Prefix {
+	var prefixes []netip.Prefix
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" || strings.EqualFold(item, "none") {
+			continue
+		}
+		if !strings.Contains(item, "/") {
+			addr, err := netip.ParseAddr(item)
+			if err != nil {
+				continue
+			}
+			addr = addr.Unmap()
+			bits := 128
+			if addr.Is4() {
+				bits = 32
+			}
+			prefixes = append(prefixes, netip.PrefixFrom(addr, bits))
+			continue
+		}
+		prefix, err := netip.ParsePrefix(item)
+		if err != nil {
+			continue
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes
+}
+
+// remotePeer returns the address of the direct peer, without its port.
+func remotePeer(r *http.Request) netip.Addr {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	addr, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	if err != nil {
+		return netip.Addr{}
+	}
+	return addr.Unmap()
+}
+
+// isTrustedProxy reports whether addr belongs to a configured proxy range.
+func isTrustedProxy(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return false
+	}
+	for _, prefix := range trustedProxyPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// forwardedClient walks X-Forwarded-For from right to left, skipping trusted
+// proxies, and returns the first untrusted hop. That is the client the edge
+// actually saw: entries to its left are client-supplied and must not be used
+// while an untrusted address remains to the right. Malformed entries are
+// ignored, and an empty result means the header is unusable.
+func forwardedClient(r *http.Request) string {
+	var hops []string
+	for _, header := range r.Header.Values("X-Forwarded-For") {
+		for _, part := range strings.Split(header, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				hops = append(hops, part)
+			}
+		}
+	}
+	leftmost := ""
+	for i := len(hops) - 1; i >= 0; i-- {
+		addr, ok := parseProxyHop(hops[i])
+		if !ok {
+			continue
+		}
+		leftmost = addr.String()
+		if !isTrustedProxy(addr) {
+			return leftmost
+		}
+	}
+	return leftmost
+}
+
+// parseProxyHop parses one X-Forwarded-For entry, which may carry a port or
+// IPv6 brackets.
+func parseProxyHop(value string) (netip.Addr, bool) {
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	addr, err := netip.ParseAddr(strings.Trim(strings.TrimSpace(value), "[]"))
+	if err != nil || !addr.IsValid() {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
+}
+
+// clientIP returns the address used to key the login, Playground and
+// re-verification rate limits. X-Forwarded-For is honored only when the direct
+// peer is a configured trusted proxy, so an internet client cannot rotate the
+// header to escape a limit, while a reverse proxy does not collapse every
+// client into one bucket.
+func clientIP(r *http.Request) string {
+	remote := remotePeer(r)
+	if remote.IsValid() && isTrustedProxy(remote) {
+		if forwarded := forwardedClient(r); forwarded != "" {
+			return forwarded
+		}
+	}
+	if remote.IsValid() {
+		return remote.String()
 	}
 	return r.RemoteAddr
 }

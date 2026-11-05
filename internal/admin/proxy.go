@@ -152,7 +152,7 @@ func (a *Server) loadProxyStore() ProxyStore {
 // saveProxyStore writes state.json atomically.
 func (a *Server) saveProxyStore(store ProxyStore) error {
 	dir := a.proxyDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(store, "", "  ")
@@ -160,10 +160,20 @@ func (a *Server) saveProxyStore(store ProxyStore) error {
 		return err
 	}
 	tmp := a.proxyStatePath() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, a.proxyStatePath())
+}
+
+// writePrivateFile writes a proxy-center file with owner-only permissions,
+// tightening a file that already exists with a looser mode. Provider URLs can
+// embed subscription tokens and the state lists proxy credentials.
+func writePrivateFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 // writeProvidersFile renders the enabled providers for the sidecar: one
@@ -176,13 +186,13 @@ func (a *Server) writeProvidersFile(store ProxyStore) error {
 		}
 		fmt.Fprintf(&b, "%s\t%s\t%s\n", p.ID, p.Name, p.URL)
 	}
-	return os.WriteFile(filepath.Join(a.proxyDir(), "providers.txt"), []byte(b.String()), 0o644)
+	return writePrivateFile(filepath.Join(a.proxyDir(), "providers.txt"), []byte(b.String()))
 }
 
 // writeSettingsFile renders the sampling settings the sidecar reads.
 func (a *Server) writeSettingsFile(store ProxyStore) error {
 	text := fmt.Sprintf("CF_NODE_COUNT=%d\nCF_PORT_BASE=%d\n", store.Settings.NodeCount, store.Settings.PortBase)
-	return os.WriteFile(filepath.Join(a.proxyDir(), "settings.env"), []byte(text), 0o644)
+	return writePrivateFile(filepath.Join(a.proxyDir(), "settings.env"), []byte(text))
 }
 
 // proxyctlPath locates the sidecar script.
@@ -236,7 +246,7 @@ func (a *Server) writeSelected(names []string) error {
 		b.WriteString(name)
 		b.WriteByte('\n')
 	}
-	return os.WriteFile(filepath.Join(a.proxyDir(), "selected.txt"), []byte(b.String()), 0o644)
+	return writePrivateFile(filepath.Join(a.proxyDir(), "selected.txt"), []byte(b.String()))
 }
 
 // mergeListeners folds the sidecar manifest into the stored node list,
@@ -405,7 +415,7 @@ func (a *Server) runProxyctl(ctx context.Context, action string) (string, error)
 func (a *Server) syncProxy(ctx context.Context) (string, error) {
 	a.proxyMu.Lock()
 	store := a.loadProxyStore()
-	if err := os.MkdirAll(a.proxyDir(), 0o755); err != nil {
+	if err := os.MkdirAll(a.proxyDir(), 0o700); err != nil {
 		a.proxyMu.Unlock()
 		return "", err
 	}
@@ -999,7 +1009,7 @@ func (a *Server) handleProxyImport(w http.ResponseWriter, r *http.Request) {
 		name = "手动导入"
 	}
 	dir := filepath.Join(a.proxyDir(), "imports")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		writeAdminError(w, http.StatusInternalServerError, "save_failed", err.Error())
 		return
 	}

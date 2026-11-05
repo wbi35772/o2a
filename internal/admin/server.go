@@ -34,9 +34,13 @@ type Server struct {
 	sessions      map[string]adminSession
 	attempts      map[string]loginWindow
 	debugAttempts map[string]loginWindow
-	lastInference *DebugInferenceResult
-	quotaMu       sync.Mutex
-	quotaCache    map[string]quotaCacheEntry
+	// sensitiveAttempts bounds password re-verification (reveal and account);
+	// verifyMu serializes the memory-hard argon2 check.
+	sensitiveAttempts map[string]loginWindow
+	verifyMu          sync.Mutex
+	lastInference     *DebugInferenceResult
+	quotaMu           sync.Mutex
+	quotaCache        map[string]quotaCacheEntry
 
 	// stateDir is the directory holding config.json, so the proxy center keeps
 	// its state, listeners and generated proxy list beside it.
@@ -44,14 +48,19 @@ type Server struct {
 	proxyMu    sync.Mutex
 	proxyJobMu sync.Mutex
 	proxyJob   ProxyJob
+
+	// samePort is true when the WebUI and the API share one listener, so the
+	// UI can present its own origin as the API base.
+	samePort bool
 }
 
 // New returns a Server for manager, reporting to monitor and logs. stateDir is
 // the directory of config.json, where the proxy center stores its state.
-func New(manager *gateway.RuntimeController, monitor *telemetry.Metrics, logs *telemetry.LogBroker, logger *slog.Logger, stateDir string) *Server {
+func New(manager *gateway.RuntimeController, monitor *telemetry.Metrics, logs *telemetry.LogBroker, logger *slog.Logger, stateDir string, samePort bool) *Server {
 	return &Server{
 		manager: manager, monitor: monitor, logs: logs, logger: logger, sessions: make(map[string]adminSession),
-		attempts: make(map[string]loginWindow), debugAttempts: make(map[string]loginWindow), stateDir: stateDir,
+		attempts: make(map[string]loginWindow), debugAttempts: make(map[string]loginWindow),
+		sensitiveAttempts: make(map[string]loginWindow), stateDir: stateDir, samePort: samePort,
 	}
 }
 
@@ -134,12 +143,17 @@ func (a *Server) staticHandler() http.Handler {
 // framing and no embedding.
 func (a *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		// HSTS only makes sense on a response a browser received over TLS;
+		// requestIsSecure accepts the edge's X-Forwarded-Proto for that.
+		if requestIsSecure(r) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -182,6 +196,7 @@ type EffectiveView struct {
 	Listen       string `json:"listen"`
 	WebUIListen  string `json:"webui_listen"`
 	WebUIEnabled bool   `json:"webui_enabled"`
+	SamePort     bool   `json:"same_port"`
 }
 
 // WebUIView is the writable part of the WebUI configuration; the password and
@@ -296,6 +311,11 @@ func (a *Server) handleReload(w http.ResponseWriter, _ *http.Request) {
 // handleReveal returns the plaintext server, Zen, Go and proxy secrets after
 // verifying the current WebUI password, and logs that it happened.
 func (a *Server) handleReveal(w http.ResponseWriter, r *http.Request) {
+	client := clientIP(r)
+	if !a.allowSensitive(client) {
+		writeAdminError(w, http.StatusTooManyRequests, "rate_limited", "too many verification attempts; try again later")
+		return
+	}
 	var input struct {
 		Password string `json:"password"`
 	}
@@ -304,12 +324,12 @@ func (a *Server) handleReveal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := a.manager.Config()
-	if !config.VerifyPassword(cfg.WebUI.PasswordHash, input.Password) {
+	if !a.verifyPassword(cfg.WebUI.PasswordHash, input.Password) {
 		writeAdminError(w, http.StatusForbidden, "verification_failed", "password verification failed")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	a.logger.Info("sensitive configuration revealed", "component", "auth", "event", "secrets_revealed", "client_ip", clientIP(r))
+	a.logger.Info("sensitive configuration revealed", "component", "auth", "event", "secrets_revealed", "client_ip", client)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"server_keys": cfg.ServerKeys, "zen_keys": cfg.ZenKeys, "go_keys": cfg.GoKeys, "proxies": cfg.Proxies})
 }
 
@@ -414,7 +434,7 @@ func (a *Server) configView() ConfigView {
 		Proxies: maskSecrets(cfg.Proxies, true), ProxyFile: cfg.ProxyFile, Upstream: cfg.Upstream, Retry: cfg.Retry, Models: cfg.Models,
 		Performance: cfg.Performance, Logging: cfg.Logging, Prefer: cfg.Prefer, Reasoning: cfg.Reasoning,
 		WebUI:     WebUIView{Enabled: cfg.WebUI.Enabled, Listen: cfg.WebUI.Listen, Username: cfg.WebUI.Username, SessionTTLMinutes: cfg.WebUI.SessionTTLMinutes},
-		Effective: EffectiveView{Listen: effective.API, WebUIListen: effective.WebUI, WebUIEnabled: effective.WebUIEnabled},
+		Effective: EffectiveView{Listen: effective.API, WebUIListen: effective.WebUI, WebUIEnabled: effective.WebUIEnabled, SamePort: a.samePort},
 		Restart:   restart,
 	}
 }

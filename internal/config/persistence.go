@@ -17,7 +17,8 @@ import (
 //
 // The data is written and synced to a temporary file created beside the
 // target, so the final rename stays on the same filesystem; the temporary
-// file takes over the existing file's permission bits. Outside Windows the
+// file keeps the existing file's owner bits, but never group or world access.
+// Outside Windows the
 // backup is a copy and the rename replaces path atomically. On Windows a
 // complete backup copy is installed before the original is staged and the
 // replacement is renamed into place. If the replacement fails, the original
@@ -47,7 +48,14 @@ func SaveAtomic(path string, cfg Config) error {
 		return fmt.Errorf("write temporary config: %w", err)
 	}
 	if info, statErr := os.Stat(path); statErr == nil {
-		if err := os.Chmod(tempPath, info.Mode().Perm()); err != nil {
+		// The configuration holds upstream API keys and the WebUI password
+		// hash. Never inherit a group- or world-readable mode from a seeded
+		// file: keep the owner's bits, capped at 0600.
+		mode := info.Mode().Perm() & 0o600
+		if mode == 0 {
+			mode = 0o600
+		}
+		if err := os.Chmod(tempPath, mode); err != nil {
 			return fmt.Errorf("set temporary config permissions: %w", err)
 		}
 	} else if !os.IsNotExist(statErr) {
@@ -173,9 +181,13 @@ func copyFile(source, target string) error {
 		return err
 	}
 	defer in.Close()
+	// The backup carries the same secrets as the configuration; keep it
+	// private even when the source file is not.
 	mode := os.FileMode(0600)
 	if info, statErr := in.Stat(); statErr == nil {
-		mode = info.Mode().Perm()
+		if perm := info.Mode().Perm() & 0o600; perm != 0 {
+			mode = perm
+		}
 	}
 	out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {

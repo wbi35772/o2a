@@ -61,17 +61,19 @@ func main() {
 	defer manager.Shutdown()
 
 	apiServer := &http.Server{
-		Addr: cfg.Listen, Handler: manager.Handler(), ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second,
+		Addr: cfg.Listen, Handler: manager.Handler(), ReadHeaderTimeout: 15 * time.Second, ReadTimeout: 60 * time.Second,
+		IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10,
 	}
 	servers := []*http.Server{apiServer}
 
 	if cfg.WebUI.Enabled {
-		admin := adminui.New(manager, monitor, hub, logger, filepath.Dir(*configPath))
+		admin := adminui.New(manager, monitor, hub, logger, filepath.Dir(*configPath), *webSamePort)
 		if *webSamePort {
 			apiServer.Handler = samePortHandler(apiServer.Handler, admin.Handler())
 		} else {
 			webServer := &http.Server{
-				Addr: cfg.WebUI.Listen, Handler: admin.Handler(), ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second,
+				Addr: cfg.WebUI.Listen, Handler: admin.Handler(), ReadHeaderTimeout: 15 * time.Second, ReadTimeout: 60 * time.Second,
+				IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10,
 			}
 			servers = append(servers, webServer)
 			go serveHTTP(cancel, logger, webServer, "webui")

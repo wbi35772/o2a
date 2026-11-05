@@ -103,8 +103,9 @@ WARP 只需要出站 UDP（Cloudflare 端点端口 `2408`），因此镜像的�
 | `OPENCODE2API_WEBUI_PORT`   | `8081`   | 映射到容器 8081 的宿主机端口。       |
 | `OPENCODE2API_LISTEN`       | 未设置   | 显式覆盖容器内 API 监听地址。        |
 | `OPENCODE2API_WEBUI_LISTEN` | 未设置   | 显式覆盖容器内 WebUI 监听地址。      |
+| `OPENCODE2API_TRUSTED_PROXIES` | 未设置 | 信任 `X-Forwarded-For` 的代理 CIDR（逗号分隔）；`none` 关闭。 |
 
-后两项在容器内对应 `LISTEN_ADDRESS` 与 `WEBUI_LISTEN_ADDRESS`。值为空时使用配置文件中的地址。首次初始化配置时，入口脚本会将示例 API 地址 `127.0.0.1:8080` 改为 `0.0.0.0:8080`，使其能够通过发布端口访问。
+后三项在容器内对应 `LISTEN_ADDRESS`、`WEBUI_LISTEN_ADDRESS` 与 `TRUSTED_PROXIES`。`TRUSTED_PROXIES` 默认信任回环和私网地址；如果边缘代理不在这些网段，请显式设置，否则登录限流会把所有客户端当成同一个代理地址。首次初始化配置时，入口脚本会将示例 API 地址 `127.0.0.1:8080` 改为 `0.0.0.0:8080`，使其能够通过发布端口访问。
 
 修改宿主机端口不会改变容器内监听地址。如果修改容器内 API 端口，还需要同步调整端口映射和镜像健康检查；默认健康检查使用 8080 端口。
 

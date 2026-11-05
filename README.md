@@ -103,8 +103,9 @@ WARP needs only outbound UDP (Cloudflare endpoint port `2408`), so the image's n
 | `OPENCODE2API_WEBUI_PORT`   | `8081`   | Host port mapped to container port 8081.          |
 | `OPENCODE2API_LISTEN`       | Unset    | Explicit container API listen override.           |
 | `OPENCODE2API_WEBUI_LISTEN` | Unset    | Explicit container WebUI listen override.         |
+| `OPENCODE2API_TRUSTED_PROXIES` | Unset | Proxy CIDRs trusted for `X-Forwarded-For`; `none` disables. |
 
-The last two variables become `LISTEN_ADDRESS` and `WEBUI_LISTEN_ADDRESS` inside the container. Empty values defer to the configuration file. While initializing a configuration, the entrypoint changes the example API address `127.0.0.1:8080` to `0.0.0.0:8080` so published ports can reach it.
+The last three variables become `LISTEN_ADDRESS`, `WEBUI_LISTEN_ADDRESS` and `TRUSTED_PROXIES` inside the container. `TRUSTED_PROXIES` defaults to loopback and private ranges; set it when the edge uses another address so per-client login limits see the real client instead of one shared proxy address. Empty values defer to the configuration file. While initializing a configuration, the entrypoint changes the example API address `127.0.0.1:8080` to `0.0.0.0:8080` so published ports can reach it.
 
 Changing host ports does not change container listeners. If you change the internal API port, also update the port mapping and the image health check, which uses port 8080.
 

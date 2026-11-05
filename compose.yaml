@@ -13,6 +13,9 @@ services:
       # OPENCODE2API_LISTEN / OPENCODE2API_WEBUI_LISTEN to override them.
       LISTEN_ADDRESS: ${OPENCODE2API_LISTEN:-}
       WEBUI_LISTEN_ADDRESS: ${OPENCODE2API_WEBUI_LISTEN:-}
+      # Comma-separated CIDRs whose X-Forwarded-For is trusted for client-IP
+      # rate limiting. Empty uses loopback and private ranges; "none" disables.
+      TRUSTED_PROXIES: ${OPENCODE2API_TRUSTED_PROXIES:-}
     ports:
       - "${OPENCODE2API_PORT:-8080}:8080"
       - "${OPENCODE2API_WEBUI_PORT:-8081}:8081"

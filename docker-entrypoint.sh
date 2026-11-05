@@ -12,6 +12,7 @@ webui_listen_address=${WEBUI_LISTEN_ADDRESS:-}
 if [ "$(id -u)" = "0" ]; then
     mkdir -p "$state_dir"
     chown opencode2api:opencode2api "$state_dir"
+    chmod 700 "$state_dir"
     exec su-exec opencode2api:opencode2api "$0" "$@"
 fi
 
@@ -42,6 +43,10 @@ if [ ! -f "$config_path" ]; then
             "config.json not found; created $config_path. Set API keys or enable anonymous mode, and change the WebUI password before use."
     fi
 fi
+
+# The configuration carries upstream API keys and the WebUI password hash.
+# A copied seed may be group/world-readable; never keep it that way.
+chmod 600 "$config_path" 2>/dev/null || true
 
 set -- /usr/local/bin/opencode2api -config "$config_path"
 if [ -n "$listen_address" ]; then

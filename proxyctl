@@ -7,6 +7,10 @@
 #   status print a one-line summary as KEY=VALUE pairs
 set -eu
 
+# Provider URLs can embed subscription tokens and the merged fleet holds node
+# credentials; keep everything this script and mihomo create private.
+umask 077
+
 state_dir=${STATE_DIR:-/var/lib/opencode2api}
 work_dir=${PROXY_WORK_DIR:-$state_dir/cfnew}
 pc_dir=$state_dir/proxycenter
@@ -28,6 +32,9 @@ fi
 log() { printf '%s\n' "$*"; }
 
 mkdir -p "$pc_dir" "$work_dir"
+chmod 700 "$pc_dir" "$work_dir" 2>/dev/null || true
+# Tighten files left by an earlier run or by a process with a looser umask.
+find "$pc_dir" "$work_dir" -type f -exec chmod 600 {} + 2>/dev/null || true
 
 # seed_providers imports the legacy cfnew-sub.txt when the panel has no
 # providers yet, so an existing deployment keeps working after the upgrade.
