@@ -59,43 +59,55 @@ function renderChecklist() {
   });
 }
 
-function renderResources(resources) {
-  const proxies = $("#proxy-table");
-  proxies.replaceChildren();
-  (resources.proxies || []).forEach((proxy) => {
-    proxies.append(
-      el("tr", {}, [
-        el("td", { text: proxy.address }),
-        el("td", {
-          class: `status ${proxy.healthy ? "ok" : "bad"}`,
-          text: proxy.healthy ? t("正常", "state.healthy") : t("不可用", "state.unavailable"),
-        }),
-        el("td", {
-          text: `Z ${proxy.zen_keys} · G ${proxy.go_keys} · A ${
-            proxy.anonymous ? t("开", "common.on") : t("关", "common.off")
-          }`,
-        }),
-      ]),
+const proxyView = { q: "", page: 1, size: 20 };
+
+function proxyRow(address, healthy, binding) {
+  return el("tr", {}, [
+    el("td", { text: address }),
+    el("td", {
+      class: `status ${healthy ? "ok" : "bad"}`,
+      text: healthy ? t("正常", "state.healthy") : t("不可用", "state.unavailable"),
+    }),
+    el("td", { text: binding }),
+  ]);
+}
+
+function renderProxyTable(resources) {
+  const body = $("#proxy-table");
+  const query = proxyView.q.toLowerCase();
+  const rows = (resources.proxies || [])
+    .filter((proxy) => !query || proxy.address.toLowerCase().includes(query))
+    .map((proxy) =>
+      proxyRow(
+        proxy.address,
+        proxy.healthy,
+        `Z ${proxy.zen_keys} · G ${proxy.go_keys} · A ${
+          proxy.anonymous ? t("开", "common.on") : t("关", "common.off")
+        }`,
+      ),
     );
-  });
   const warp = resources.warp;
-  if (warp?.enabled) {
+  if (warp?.enabled && (!query || `warp ${warp.stack}`.toLowerCase().includes(query))) {
     // WARP is not a proxy: show it beside them so the egress that carries
     // free-model traffic is visible without pretending it is a bound node.
-    proxies.append(
-      el("tr", {}, [
-        el("td", { text: `WARP · ${warp.stack}` }),
-        el("td", {
-          class: `status ${warp.active > 0 ? "ok" : "bad"}`,
-          text: warp.active > 0 ? t("正常", "state.healthy") : t("不可用", "state.unavailable"),
-        }),
-        el("td", {
-          text: `${warp.active}/${warp.size} · ${(warp.egress || []).join(", ") || "-"}`,
-        }),
-      ]),
+    rows.push(
+      proxyRow(`WARP · ${warp.stack}`, warp.active > 0, `${warp.active}/${warp.size} · ${
+        (warp.egress || []).join(", ") || "-"
+      }`),
     );
   }
-  if (!proxies.children.length) emptyRow(proxies, 3);
+  const pages = Math.max(1, Math.ceil(rows.length / proxyView.size));
+  proxyView.page = Math.min(Math.max(1, proxyView.page), pages);
+  const start = (proxyView.page - 1) * proxyView.size;
+  body.replaceChildren(...rows.slice(start, start + proxyView.size));
+  if (!rows.length) emptyRow(body, 3);
+  $("#overview-proxy-info").textContent = `${proxyView.page} / ${pages} · ${rows.length}`;
+  $("#overview-proxy-prev").disabled = proxyView.page <= 1;
+  $("#overview-proxy-next").disabled = proxyView.page >= pages;
+}
+
+function renderResources(resources) {
+  renderProxyTable(resources);
   const keys = $("#key-table");
   keys.replaceChildren();
   if (resources.anonymous) {
@@ -219,6 +231,63 @@ function renderTiers(usage) {
   if (!entries.length) host.append(el("div", { class: "empty", text: t("尚无 Tier 用量", "usage.empty.tiers") }));
 }
 
+const keyColor = (index) => `hsl(${(index * 47 + 198) % 360} 64% 48%)`;
+
+function renderUsageKeys(usage) {
+  const config = store.get("config");
+  const names = new Map((config?.server_keys || []).map((key) => [key.id, key.display || key.id]));
+  const entries = Object.entries(usage.server_keys || {})
+    .map(([id, value]) => ({
+      id,
+      display: names.get(id) || (id === "playground" ? t("请求测试", "usage.keys.playground") : id),
+      ...value,
+    }))
+    .sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
+  const total = entries.reduce((sum, entry) => sum + (entry.total_tokens || 0), 0);
+  const share = $("#usage-key-share");
+  const table = $("#usage-keys");
+  share.replaceChildren();
+  table.replaceChildren();
+  if (!entries.length) {
+    share.append(el("div", { class: "empty", text: t("尚无 Server Key 用量", "usage.empty.keys") }));
+    emptyRow(table, 7);
+    return;
+  }
+  const bar = el("div", { class: "key-share-bar" });
+  const legend = el("div", { class: "key-share-legend" });
+  entries.forEach((entry, index) => {
+    const color = keyColor(index);
+    const percent = total ? ((entry.total_tokens || 0) / total) * 100 : 0;
+    const segment = el("span", { class: "key-share-segment" });
+    segment.style.width = `${percent}%`;
+    segment.style.background = color;
+    segment.title = `${entry.display} · ${formatNumber(entry.total_tokens)} (${percent.toFixed(1)}%)`;
+    bar.append(segment);
+    const legendDot = el("span", { class: "key-dot" });
+    legendDot.style.background = color;
+    legend.append(
+      el("span", { class: "key-share-item" }, [
+        legendDot,
+        el("span", { text: `${entry.display} · ${percent.toFixed(1)}%` }),
+      ]),
+    );
+    const rowDot = el("span", { class: "key-dot" });
+    rowDot.style.background = color;
+    table.append(
+      el("tr", {}, [
+        el("td", {}, [rowDot, el("span", { class: "mono", text: entry.display })]),
+        el("td", { class: "num", text: formatNumber(entry.requests) }),
+        el("td", { class: "num", text: formatNumber(entry.input_tokens) }),
+        el("td", { class: "num", text: formatNumber(entry.output_tokens) }),
+        el("td", { class: "num", text: formatNumber(entry.cached_tokens) }),
+        el("td", { class: "num", text: formatNumber(entry.reasoning_tokens) }),
+        el("td", { class: "num", text: formatNumber(entry.total_tokens) }),
+      ]),
+    );
+  });
+  share.append(bar, legend);
+}
+
 function renderUsage(monitor) {
   const usage = monitor.usage?.last_hour || {};
   const tokens = usage.tokens || {};
@@ -228,6 +297,7 @@ function renderUsage(monitor) {
   $("#u-reasoning").textContent = formatNumber(tokens.reasoning_tokens);
   renderTrend(monitor.metrics);
   renderUsageModels(usage);
+  renderUsageKeys(usage);
   renderTiers(usage);
 }
 
@@ -245,6 +315,30 @@ export default {
   sub: "运行指标、Token 用量与资源状态。",
   init() {
     bindTabs($("#page-overview"));
+    $("#overview-proxy-search").addEventListener("input", (event) => {
+      proxyView.q = event.target.value.trim();
+      proxyView.page = 1;
+      const monitor = store.get("monitor");
+      if (monitor) renderProxyTable(monitor.resources);
+    });
+    $("#overview-proxy-prev").addEventListener("click", () => {
+      if (proxyView.page > 1) {
+        proxyView.page -= 1;
+        const monitor = store.get("monitor");
+        if (monitor) renderProxyTable(monitor.resources);
+      }
+    });
+    $("#overview-proxy-next").addEventListener("click", () => {
+      proxyView.page += 1;
+      const monitor = store.get("monitor");
+      if (monitor) renderProxyTable(monitor.resources);
+    });
+    $("#overview-proxy-size").addEventListener("change", (event) => {
+      proxyView.size = Number(event.target.value) || 20;
+      proxyView.page = 1;
+      const monitor = store.get("monitor");
+      if (monitor) renderProxyTable(monitor.resources);
+    });
     store.on("monitor", render);
     store.on("config", renderChecklist);
     onChange(render);

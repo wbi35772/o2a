@@ -298,11 +298,24 @@ function renderRouteModels() {
 }
 
 const pagerState = {
-  requests: { page: 1, size: 100 },
-  attempts: { page: 1, size: 100 },
+  requests: { page: 1, size: 25 },
+  attempts: { page: 1, size: 25 },
 };
 
 let activeTab = "playground";
+let activeLedger = "requests";
+
+function showLedgerPanel(name) {
+  activeLedger = name;
+  for (const button of document.querySelectorAll("#page-diagnostics [data-ledger-tab]")) {
+    const active = button.dataset.ledgerTab === name;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  for (const panel of document.querySelectorAll("#page-diagnostics [data-ledger-panel]"))
+    panel.classList.toggle("hidden", panel.dataset.ledgerPanel !== name);
+  renderLedger();
+}
 
 function renderLedger() {
   renderRequests();
@@ -326,9 +339,11 @@ export default {
         if (!store.get("debug")) loadDebugModels();
         renderModels();
       }
-      if (id === "ledger") renderLedger();
+      if (id === "ledger") showLedgerPanel(activeLedger);
       if (id === "route") renderRoute();
     });
+    for (const button of document.querySelectorAll("#page-diagnostics [data-ledger-tab]"))
+      button.addEventListener("click", () => showLedgerPanel(button.dataset.ledgerTab));
     logstream.bind();
     $("#play-protocol").addEventListener("change", resetTemplate);
     $("#play-model").addEventListener("change", () => {

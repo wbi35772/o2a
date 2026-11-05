@@ -4,6 +4,7 @@ import { loadConfig, loadDebugModels } from "../data.js";
 import * as store from "../store.js";
 import { t, onChange } from "../i18n.js";
 import { $, $$, bindTabs, el, openDialog, toast } from "../ui.js";
+import proxyPage from "./proxy.js";
 
 // A long proxy list is rendered collapsed: the first CHIP_RENDER_LIMIT chips
 // plus a toggle. A single flex-wrap row with thousands of chips is what froze
@@ -239,13 +240,48 @@ function reveal() {
   });
 }
 
+// The proxy center lives inside 配置中心 > 代理 as its own nested tab group.
+// Move the existing #page-proxy subtree here instead of duplicating its markup,
+// then let proxy.js own the inner tabs and its data.
+let proxySection = "nodes";
+
+function mountProxyCenter() {
+  const page = $("#page-proxy");
+  const host = $("#config-proxy-center");
+  if (!page || !host || page.parentElement === host) return;
+  page.classList.remove("page", "hidden");
+  page.classList.add("stack");
+  host.append(page);
+  proxyPage.init();
+}
+
+function showProxySection(name) {
+  proxySection = name;
+  for (const button of $$("#config-proxy-tabs [data-config-proxy-tab]")) {
+    const active = button.dataset.configProxyTab === name;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  for (const panel of $$("[data-config-proxy-panel]"))
+    panel.classList.toggle("hidden", panel.dataset.configProxyPanel !== name);
+  if (name === "center") proxyPage.show();
+  else proxyPage.hide();
+}
+
 export default {
   id: "config",
   title: "配置中心",
   sub: "验证后原子保存，并热应用可变字段。",
   init() {
     store.on("config", fillConfig);
-    bindTabs($("#page-config"));
+    mountProxyCenter();
+    bindTabs($("#page-config"), (id) => {
+      if (id === "proxies") {
+        if (proxySection === "center") proxyPage.show();
+      } else proxyPage.hide();
+    });
+    for (const button of $$("#config-proxy-tabs [data-config-proxy-tab]"))
+      button.addEventListener("click", () => showProxySection(button.dataset.configProxyTab));
     $("#config-form").addEventListener("submit", save);
     $("#reload-config").addEventListener("click", reload);
     $("#reveal").addEventListener("click", reveal);
@@ -260,5 +296,12 @@ export default {
           : t("收起", "config.chips.collapse");
       });
     });
+  },
+  show() {
+    mountProxyCenter();
+    if (proxySection === "center") proxyPage.show();
+  },
+  hide() {
+    proxyPage.hide();
   },
 };

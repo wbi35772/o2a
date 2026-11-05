@@ -245,7 +245,7 @@ async function applySelection(auto) {
 }
 
 async function saveSettings(event) {
-  event.preventDefault();
+  event?.preventDefault?.();
   try {
     await api("/api/proxy/settings", {
       method: "PUT",
@@ -265,7 +265,7 @@ async function saveSettings(event) {
 }
 
 async function addProvider(event) {
-  event.preventDefault();
+  event?.preventDefault?.();
   try {
     await api("/api/proxy/providers", {
       method: "POST",
@@ -295,10 +295,13 @@ async function loadLogs() {
 
 function showPanel(name) {
   state.panel = name;
-  for (const button of document.querySelectorAll("#proxy-tabs .tab"))
-    button.classList.toggle("active", button.dataset.panel === name);
-  for (const panel of document.querySelectorAll("#page-proxy [data-panel]"))
-    panel.classList.toggle("hidden", panel.dataset.panel !== name);
+  for (const button of document.querySelectorAll("#proxy-tabs [data-proxy-tab]")) {
+    const active = button.dataset.proxyTab === name;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  for (const panel of document.querySelectorAll("#page-proxy [data-proxy-panel]"))
+    panel.classList.toggle("hidden", panel.dataset.proxyPanel !== name);
   if (name === "logs") loadLogs();
 }
 
@@ -309,8 +312,8 @@ function bind() {
   $("#proxy-test-picked").addEventListener("click", () => testSelection(false));
   $("#proxy-apply").addEventListener("click", () => applySelection(false));
   $("#proxy-apply-auto").addEventListener("click", () => applySelection(true));
-  $("#proxy-settings-form").addEventListener("submit", saveSettings);
-  $("#proxy-provider-form").addEventListener("submit", addProvider);
+  $("#proxy-settings-save").addEventListener("click", saveSettings);
+  $("#proxy-provider-add").addEventListener("click", addProvider);
   $("#proxy-prev").addEventListener("click", () => {
     if (state.page > 1) {
       state.page -= 1;
@@ -334,22 +337,45 @@ function bind() {
     clearTimeout(state.qTimer);
     state.qTimer = setTimeout(reload, 300);
   });
+  $("#proxy-filter-q").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") event.preventDefault();
+  });
+  // The proxy forms live inside the outer config form now, so Enter must not
+  // bubble up into an implicit config submit.
+  for (const id of ["proxy-provider-name", "proxy-provider-url"])
+    $(`#${id}`).addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      addProvider();
+    });
+  for (const id of ["proxy-node-count", "proxy-port-base", "proxy-test-url", "proxy-timeout"])
+    $(`#${id}`).addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      saveSettings();
+    });
   $("#proxy-logs-refresh").addEventListener("click", loadLogs);
-  for (const button of document.querySelectorAll("#proxy-tabs .tab"))
-    button.addEventListener("click", () => showPanel(button.dataset.panel));
+  for (const button of document.querySelectorAll("#proxy-tabs [data-proxy-tab]"))
+    button.addEventListener("click", () => showPanel(button.dataset.proxyTab));
 }
+
+let bound = false;
 
 export default {
   id: "proxy",
   title: "代理中心",
   sub: "管理订阅、节点池与本地 SOCKS 出口。",
   init() {
+    if (bound) return;
+    bound = true;
     bind();
+    showPanel(state.panel);
     onChange(() => {
       if (state.store) renderOverview();
     });
   },
   show() {
+    showPanel(state.panel);
     refreshAll();
   },
   hide() {

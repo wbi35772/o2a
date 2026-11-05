@@ -13,16 +13,7 @@
     <link rel="stylesheet" href="/css/base.css" />
     <link rel="stylesheet" href="/css/components.css" />
     <link rel="stylesheet" href="/css/pages.css" />
-    <script>
-      // Apply the stored theme before first paint; theme.js owns every change.
-      try {
-        var opencodeTheme = localStorage.getItem("opencode2api.ui.theme") || "auto";
-        var opencodeDark =
-          opencodeTheme === "dark" ||
-          (opencodeTheme === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
-        document.documentElement.setAttribute("data-theme", opencodeDark ? "dark" : "light");
-      } catch (_) {}
-    </script>
+    <script src="/js/theme-init.js"></script>
   </head>
   <body>
     <a class="skip-link" href="#main" data-i18n="a11y.skip">跳到主要内容</a>
@@ -54,7 +45,6 @@
             <div class="nav-group-title" data-i18n="nav.group.runtime">运行</div>
             <button class="nav-item active" data-page="overview" data-i18n="nav.overview">概览</button>
             <button class="nav-item" data-page="diagnostics" data-i18n="nav.diagnostics">诊断</button>
-            <button class="nav-item" data-page="proxy" data-i18n="nav.proxy">代理中心</button>
           </div>
           <div class="nav-group">
             <div class="nav-group-title" data-i18n="nav.group.integration">接入</div>
@@ -103,9 +93,9 @@
           <div id="restart-notice" class="notice hidden" role="status"></div>
 
           <section id="page-overview" class="page">
-            <div class="tabs" role="tablist" aria-label="概览视图">
-              <button class="tab active" data-tab="summary" role="tab" aria-selected="true" data-i18n="overview.tab.summary">概览</button>
-              <button class="tab" data-tab="usage" role="tab" aria-selected="false" data-i18n="overview.tab.usage">用量</button>
+            <div class="tabs page-tabs" role="tablist" aria-label="概览视图">
+              <button class="tab active" type="button" data-tab="summary" role="tab" aria-selected="true" data-i18n="overview.tab.summary">概览</button>
+              <button class="tab" type="button" data-tab="usage" role="tab" aria-selected="false" data-i18n="overview.tab.usage">用量</button>
             </div>
             <div data-panel="summary" class="stack" role="tabpanel">
               <section id="overview-checklist" class="section hidden">
@@ -145,8 +135,15 @@
                     <div>
                       <h2 class="section-title" data-i18n="overview.proxy.title">Proxy 节点</h2>
                     </div>
+                    <input
+                      id="overview-proxy-search"
+                      class="head-search"
+                      placeholder="筛选节点或服务器"
+                      aria-label="筛选 Proxy 节点"
+                      data-i18n-attr="placeholder:overview.proxy.filter,aria-label:overview.proxy.filter"
+                    />
                   </div>
-                  <div class="table-wrap">
+                  <div class="table-scroll">
                     <table class="table">
                       <thead>
                         <tr>
@@ -157,6 +154,16 @@
                       </thead>
                       <tbody id="proxy-table"></tbody>
                     </table>
+                  </div>
+                  <div class="pager">
+                    <button id="overview-proxy-prev" type="button" class="btn btn-sm">上一页</button>
+                    <span id="overview-proxy-info" class="pager-info"></span>
+                    <button id="overview-proxy-next" type="button" class="btn btn-sm">下一页</button>
+                    <select id="overview-proxy-size" class="pager-size" aria-label="每页条数">
+                      <option value="10">10</option>
+                      <option value="20" selected>20</option>
+                      <option value="50">50</option>
+                    </select>
                   </div>
                 </section>
                 <section class="section">
@@ -222,6 +229,33 @@
                 <div id="usage-trend" class="trend"></div>
                 <div id="usage-trend-meta" class="trend-meta"></div>
               </section>
+              <section class="section">
+                <div class="section-head">
+                  <div>
+                    <h2 class="section-title" data-i18n="usage.keys.title">Server Key 用量</h2>
+                    <p class="section-caption" data-i18n="usage.keys.caption">
+                      最近 60 分钟，每个 Server Key 的 Token 占比与明细。
+                    </p>
+                  </div>
+                </div>
+                <div id="usage-key-share" class="key-share"></div>
+                <div class="table-wrap">
+                  <table class="table">
+                    <thead>
+                      <tr>
+                        <th data-i18n="usage.keys.col.key">Server Key</th>
+                        <th class="num" data-i18n="usage.keys.col.requests">请求</th>
+                        <th class="num" data-i18n="usage.keys.col.input">输入</th>
+                        <th class="num" data-i18n="usage.keys.col.output">输出</th>
+                        <th class="num" data-i18n="usage.keys.col.cached">缓存</th>
+                        <th class="num" data-i18n="usage.keys.col.reasoning">推理</th>
+                        <th class="num" data-i18n="usage.keys.col.total">总量</th>
+                      </tr>
+                    </thead>
+                    <tbody id="usage-keys"></tbody>
+                  </table>
+                </div>
+              </section>
               <div class="split">
                 <section class="section">
                   <div class="section-head">
@@ -258,11 +292,11 @@
           </section>
 
           <section id="page-diagnostics" class="page hidden">
-            <div class="tabs" role="tablist" aria-label="诊断视图">
-              <button class="tab active" data-tab="playground" role="tab" aria-selected="true" data-i18n="diagnostics.tab.playground">请求测试</button>
-              <button class="tab" data-tab="ledger" role="tab" aria-selected="false" data-i18n="diagnostics.tab.ledger">请求流水</button>
-              <button class="tab" data-tab="logs" role="tab" aria-selected="false" data-i18n="diagnostics.tab.logs">事件流</button>
-              <button class="tab" data-tab="route" role="tab" aria-selected="false" data-i18n="diagnostics.tab.route">路由与资格</button>
+            <div class="tabs page-tabs" role="tablist" aria-label="诊断视图">
+              <button class="tab active" type="button" data-tab="playground" role="tab" aria-selected="true" data-i18n="diagnostics.tab.playground">请求测试</button>
+              <button class="tab" type="button" data-tab="ledger" role="tab" aria-selected="false" data-i18n="diagnostics.tab.ledger">请求流水</button>
+              <button class="tab" type="button" data-tab="logs" role="tab" aria-selected="false" data-i18n="diagnostics.tab.logs">事件流</button>
+              <button class="tab" type="button" data-tab="route" role="tab" aria-selected="false" data-i18n="diagnostics.tab.route">路由与资格</button>
             </div>
             <div data-panel="playground" class="stack" role="tabpanel">
               <div class="play-layout">
@@ -334,6 +368,11 @@
               </div>
             </div>
             <div data-panel="ledger" class="stack hidden" role="tabpanel">
+              <div class="tabs subtabs" role="tablist" aria-label="请求流水分区">
+                <button class="tab active" type="button" data-ledger-tab="requests" role="tab" aria-selected="true" data-i18n="diagnostics.requests.title">请求路由</button>
+                <button class="tab" type="button" data-ledger-tab="attempts" role="tab" aria-selected="false" data-i18n="diagnostics.attempts.title">上游尝试</button>
+              </div>
+              <div data-ledger-panel="requests" class="stack" role="tabpanel">
               <section class="section">
                 <div class="section-head">
                   <div>
@@ -369,13 +408,16 @@
                     aria-label="每页条数"
                     data-i18n-attr="aria-label:diag.pager.size"
                   >
+                    <option value="25" selected>25</option>
                     <option value="50">50</option>
-                    <option value="100" selected>100</option>
+                    <option value="100">100</option>
                     <option value="200">200</option>
                     <option value="500">500</option>
                   </select>
                 </div>
               </section>
+              </div>
+              <div data-ledger-panel="attempts" class="stack hidden" role="tabpanel">
               <section class="section">
                 <div class="section-head">
                   <div>
@@ -410,13 +452,15 @@
                     aria-label="每页条数"
                     data-i18n-attr="aria-label:diag.pager.size"
                   >
+                    <option value="25" selected>25</option>
                     <option value="50">50</option>
-                    <option value="100" selected>100</option>
+                    <option value="100">100</option>
                     <option value="200">200</option>
                     <option value="500">500</option>
                   </select>
                 </div>
               </section>
+              </div>
             </div>
             <div data-panel="logs" class="stack hidden" role="tabpanel">
               <div class="filters">
@@ -632,9 +676,9 @@
           </section>
 
           <section id="page-model-quotas" class="page hidden">
-            <div class="tabs" role="tablist" aria-label="模型视图">
-              <button class="tab active" data-tab="quota" role="tab" aria-selected="true" data-i18n="quotas.tab.quota">套餐额度</button>
-              <button class="tab" data-tab="free" role="tab" aria-selected="false" data-i18n="quotas.tab.free">免费模型</button>
+            <div class="tabs page-tabs" role="tablist" aria-label="模型视图">
+              <button class="tab active" type="button" data-tab="quota" role="tab" aria-selected="true" data-i18n="quotas.tab.quota">套餐额度</button>
+              <button class="tab" type="button" data-tab="free" role="tab" aria-selected="false" data-i18n="quotas.tab.free">免费模型</button>
             </div>
             <div data-panel="quota" class="stack" role="tabpanel">
               <section class="section">
@@ -800,8 +844,8 @@
                   </p>
                 </div>
                 <div class="actions">
-                  <button id="proxy-refresh" class="btn btn-sm" data-i18n="proxy.refresh">刷新</button>
-                  <button id="proxy-sync" class="btn btn-sm btn-primary" data-i18n="proxy.sync">同步订阅</button>
+                  <button id="proxy-refresh" type="button" class="btn btn-sm" data-i18n="proxy.refresh">刷新</button>
+                  <button id="proxy-sync" type="button" class="btn btn-sm btn-primary" data-i18n="proxy.sync">同步订阅</button>
                 </div>
               </div>
               <div id="proxy-cards" class="facts"></div>
@@ -809,14 +853,14 @@
             </section>
 
             <section class="section">
-              <div id="proxy-tabs" class="tabs" role="tablist" aria-label="代理中心分区">
-                <button class="tab active" data-panel="nodes" role="tab" aria-selected="true" data-i18n="proxy.tab.nodes">节点与出口</button>
-                <button class="tab" data-panel="providers" role="tab" aria-selected="false" data-i18n="proxy.tab.providers">订阅</button>
-                <button class="tab" data-panel="settings" role="tab" aria-selected="false" data-i18n="proxy.tab.settings">设置</button>
-                <button class="tab" data-panel="logs" role="tab" aria-selected="false" data-i18n="proxy.tab.logs">日志</button>
+              <div id="proxy-tabs" class="tabs subtabs" role="tablist" aria-label="代理中心分区">
+                <button class="tab active" type="button" data-proxy-tab="nodes" role="tab" aria-selected="true" data-i18n="proxy.tab.nodes">节点与出口</button>
+                <button class="tab" type="button" data-proxy-tab="providers" role="tab" aria-selected="false" data-i18n="proxy.tab.providers">订阅</button>
+                <button class="tab" type="button" data-proxy-tab="settings" role="tab" aria-selected="false" data-i18n="proxy.tab.settings">设置</button>
+                <button class="tab" type="button" data-proxy-tab="logs" role="tab" aria-selected="false" data-i18n="proxy.tab.logs">日志</button>
               </div>
 
-              <div data-panel="nodes" class="stack" role="tabpanel">
+              <div data-proxy-panel="nodes" class="stack" role="tabpanel">
                 <div class="form-grid">
                   <div class="field">
                     <label for="proxy-filter-status" data-i18n="proxy.filter.status">状态</label>
@@ -834,10 +878,10 @@
                   </div>
                 </div>
                 <div class="actions">
-                  <button id="proxy-test-all" class="btn btn-sm" data-i18n="proxy.testAll">测试当前筛选</button>
-                  <button id="proxy-test-picked" class="btn btn-sm" data-i18n="proxy.testPicked">测试勾选</button>
-                  <button id="proxy-apply" class="btn btn-sm btn-primary" data-i18n="proxy.apply">应用勾选</button>
-                  <button id="proxy-apply-auto" class="btn btn-sm" data-i18n="proxy.applyAuto">只应用可用</button>
+                  <button id="proxy-test-all" type="button" class="btn btn-sm" data-i18n="proxy.testAll">测试当前筛选</button>
+                  <button id="proxy-test-picked" type="button" class="btn btn-sm" data-i18n="proxy.testPicked">测试勾选</button>
+                  <button id="proxy-apply" type="button" class="btn btn-sm btn-primary" data-i18n="proxy.apply">应用勾选</button>
+                  <button id="proxy-apply-auto" type="button" class="btn btn-sm" data-i18n="proxy.applyAuto">只应用可用</button>
                 </div>
                 <div class="table-wrap">
                   <table class="table">
@@ -859,28 +903,28 @@
                   </table>
                 </div>
                 <div class="actions">
-                  <button id="proxy-prev" class="btn btn-sm" data-i18n="proxy.prev">上一页</button>
+                  <button id="proxy-prev" type="button" class="btn btn-sm" data-i18n="proxy.prev">上一页</button>
                   <span id="proxy-page" class="section-caption"></span>
-                  <button id="proxy-next" class="btn btn-sm" data-i18n="proxy.next">下一页</button>
+                  <button id="proxy-next" type="button" class="btn btn-sm" data-i18n="proxy.next">下一页</button>
                 </div>
               </div>
 
-              <div data-panel="providers" class="stack hidden" role="tabpanel">
-                <form id="proxy-provider-form" class="stack">
+              <div data-proxy-panel="providers" class="stack hidden" role="tabpanel">
+                <div id="proxy-provider-form" class="stack">
                   <div class="form-grid">
                     <div class="field">
                       <label for="proxy-provider-name" data-i18n="proxy.provider.name">名称</label>
-                      <input id="proxy-provider-name" placeholder="cf4" required />
+                      <input id="proxy-provider-name" placeholder="cf4" />
                     </div>
                     <div class="field full">
                       <label for="proxy-provider-url" data-i18n="proxy.provider.url">订阅地址</label>
-                      <input id="proxy-provider-url" placeholder="https://example.com/sub" required />
+                      <input id="proxy-provider-url" placeholder="https://example.com/sub" />
                     </div>
                   </div>
                   <div class="actions">
-                    <button class="btn btn-sm btn-primary" type="submit" data-i18n="proxy.provider.add">添加订阅</button>
+                    <button id="proxy-provider-add" class="btn btn-sm btn-primary" type="button" data-i18n="proxy.provider.add">添加订阅</button>
                   </div>
-                </form>
+                </div>
                 <div class="table-wrap">
                   <table class="table">
                     <thead>
@@ -900,8 +944,8 @@
                 </div>
               </div>
 
-              <div data-panel="settings" class="stack hidden" role="tabpanel">
-                <form id="proxy-settings-form" class="stack">
+              <div data-proxy-panel="settings" class="stack hidden" role="tabpanel">
+                <div id="proxy-settings-form" class="stack">
                   <div class="form-grid">
                     <div class="field">
                       <label for="proxy-node-count" data-i18n="proxy.settings.count">出口数量</label>
@@ -925,17 +969,17 @@
                     <span data-i18n="proxy.settings.autoSelect">测试后自动只应用可用节点</span>
                   </label>
                   <div class="actions">
-                    <button class="btn btn-sm btn-primary" type="submit" data-i18n="proxy.settings.save">保存设置</button>
+                    <button id="proxy-settings-save" class="btn btn-sm btn-primary" type="button" data-i18n="proxy.settings.save">保存设置</button>
                   </div>
                   <p class="section-caption" data-i18n="proxy.settings.note">
                     修改数量或端口起点后需要重新同步。测试会通过每个本地 SOCKS 端口真实请求测试地址。
                   </p>
-                </form>
+                </div>
               </div>
 
-              <div data-panel="logs" class="stack hidden" role="tabpanel">
+              <div data-proxy-panel="logs" class="stack hidden" role="tabpanel">
                 <div class="actions">
-                  <button id="proxy-logs-refresh" class="btn btn-sm" data-i18n="proxy.logs.refresh">刷新日志</button>
+                  <button id="proxy-logs-refresh" type="button" class="btn btn-sm" data-i18n="proxy.logs.refresh">刷新日志</button>
                 </div>
                 <pre id="proxy-logs" class="logs"></pre>
               </div>
@@ -944,13 +988,13 @@
 
           <section id="page-config" class="page hidden">
             <form id="config-form" class="stack">
-              <div class="tabs" role="tablist" aria-label="配置分区">
-                <button class="tab active" data-tab="service" role="tab" aria-selected="true" data-i18n="config.tab.service">服务</button>
-                <button class="tab" data-tab="keys" role="tab" aria-selected="false" data-i18n="config.tab.keys">密钥与匿名</button>
-                <button class="tab" data-tab="proxies" role="tab" aria-selected="false" data-i18n="config.tab.proxies">代理</button>
-                <button class="tab" data-tab="upstream" role="tab" aria-selected="false" data-i18n="config.tab.upstream">上游与模型</button>
-                <button class="tab" data-tab="reasoning" role="tab" aria-selected="false" data-i18n="config.tab.reasoning">推理与性能</button>
-                <button class="tab" data-tab="logging" role="tab" aria-selected="false" data-i18n="config.tab.logging">日志</button>
+              <div class="tabs page-tabs" role="tablist" aria-label="配置分区">
+                <button class="tab active" type="button" data-tab="service" role="tab" aria-selected="true" data-i18n="config.tab.service">服务</button>
+                <button class="tab" type="button" data-tab="keys" role="tab" aria-selected="false" data-i18n="config.tab.keys">密钥与匿名</button>
+                <button class="tab" type="button" data-tab="proxies" role="tab" aria-selected="false" data-i18n="config.tab.proxies">代理</button>
+                <button class="tab" type="button" data-tab="upstream" role="tab" aria-selected="false" data-i18n="config.tab.upstream">上游与模型</button>
+                <button class="tab" type="button" data-tab="reasoning" role="tab" aria-selected="false" data-i18n="config.tab.reasoning">推理与性能</button>
+                <button class="tab" type="button" data-tab="logging" role="tab" aria-selected="false" data-i18n="config.tab.logging">日志</button>
               </div>
 
               <div data-panel="service" class="stack" role="tabpanel">
@@ -1036,67 +1080,79 @@
               </div>
 
               <div data-panel="proxies" class="stack hidden" role="tabpanel">
-                <section class="section">
-                  <div class="section-head">
-                    <div>
-                      <h2 class="section-title" data-i18n="config.proxy.title">Proxy 节点</h2>
+                <div id="config-proxy-tabs" class="tabs subtabs" role="tablist" aria-label="代理分区">
+                  <button class="tab active" type="button" data-config-proxy-tab="nodes" role="tab" aria-selected="true" data-i18n="config.proxy.tab.nodes">Proxy 节点</button>
+                  <button class="tab" type="button" data-config-proxy-tab="center" role="tab" aria-selected="false" data-i18n="config.proxy.tab.center">代理中心</button>
+                  <button class="tab" type="button" data-config-proxy-tab="warp" role="tab" aria-selected="false" data-i18n="config.warp.title">WARP 出口</button>
+                </div>
+                <div data-config-proxy-panel="nodes" class="stack" role="tabpanel">
+                  <section class="section">
+                    <div class="section-head">
+                      <div>
+                        <h2 class="section-title" data-i18n="config.proxy.title">Proxy 节点</h2>
+                      </div>
                     </div>
-                  </div>
-                  <div id="proxies-chips" class="chips"></div>
-                  <div class="form-grid">
-                    <div class="field">
-                      <label for="proxies-new" data-i18n="config.proxy.add">新增 Proxy（每行一个）</label>
-                      <textarea
-                        id="proxies-new"
-                        placeholder="direct&#10;http://user:pass@host:port&#10;http://127.0.0.1:7890#pool"
-                      ></textarea>
+                    <div id="proxies-chips" class="chips"></div>
+                    <div class="form-grid">
+                      <div class="field">
+                        <label for="proxies-new" data-i18n="config.proxy.add">新增 Proxy（每行一个）</label>
+                        <textarea
+                          id="proxies-new"
+                          placeholder="direct&#10;http://user:pass@host:port&#10;http://127.0.0.1:7890#pool"
+                        ></textarea>
+                      </div>
+                      <div class="field">
+                        <label for="c-proxyfile">Proxy File</label>
+                        <input id="c-proxyfile" placeholder="proxies.txt" />
+                      </div>
                     </div>
-                    <div class="field">
-                      <label for="c-proxyfile">Proxy File</label>
-                      <input id="c-proxyfile" placeholder="proxies.txt" />
+                  </section>
+                </div>
+                <div data-config-proxy-panel="center" class="stack hidden" role="tabpanel">
+                  <div id="config-proxy-center"></div>
+                </div>
+                <div data-config-proxy-panel="warp" class="stack hidden" role="tabpanel">
+                  <section class="section">
+                    <div class="section-head">
+                      <div>
+                        <h2 class="section-title" data-i18n="config.warp.title">WARP 出口</h2>
+                        <p class="section-caption" data-i18n="config.warp.caption">
+                          开启后，免费模型流量（匿名通道、免费模型 Zen Key、免费模型探测）改走用户态 WARP，不再使用任何 Proxy；Go 套餐与付费模型保持不变。出口收到 429/403 立即淘汰并在后台重新注册，免费模型请求持续轮换出口，用完 retry.max_attempts 次后才把最后一个 429 返回客户端。
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                </section>
-                <section class="section">
-                  <div class="section-head">
-                    <div>
-                      <h2 class="section-title" data-i18n="config.warp.title">WARP 出口</h2>
-                      <p class="section-caption" data-i18n="config.warp.caption">
-                        开启后，免费模型流量（匿名通道、免费模型 Zen Key、免费模型探测）改走用户态 WARP，不再使用任何 Proxy；Go 套餐与付费模型保持不变。出口收到 429/403 立即淘汰并在后台重新注册，免费模型请求持续轮换出口，用完 retry.max_attempts 次后才把最后一个 429 返回客户端。
-                      </p>
+                    <div class="form-grid">
+                      <div class="field full">
+                        <label class="check">
+                          <input id="c-warp-enabled" type="checkbox" />
+                          <span data-i18n="config.warp.enabled">免费模型流量通过 WARP 出口</span>
+                        </label>
+                      </div>
+                      <div class="field">
+                        <label for="c-warp-pool" data-i18n="config.warp.pool">WARP 出口上限</label>
+                        <input id="c-warp-pool" type="number" min="1" max="32" step="1" />
+                        <p class="section-caption" data-i18n="config.warp.pool.hint">
+                          上限而非固定值：第一个出口就绪后，后台预注册一半（至少 1 个）作为暖池；活跃出口随并发调整（每个在途请求一个，另留一个备用），空闲 60 秒后回收多余出口。
+                        </p>
+                      </div>
+                      <div class="field">
+                        <label for="c-warp-stack" data-i18n="config.warp.stack">网络栈</label>
+                        <select id="c-warp-stack">
+                          <option value="ipv6">IPv6</option>
+                          <option value="ipv4">IPv4</option>
+                          <option value="dual" data-i18n="config.warp.stack.dual">双栈</option>
+                        </select>
+                      </div>
+                      <div class="field full">
+                        <label for="c-warp-source" data-i18n="config.warp.source">外层 IPv6 源前缀（/64）</label>
+                        <input id="c-warp-source" placeholder="2001:db8:1::/64" />
+                        <p class="section-caption" data-i18n="config.warp.source.hint">
+                          仅在使用 IPv6 网络栈时生效。每个 WARP 出口从该前缀取一个源地址出网，换出口即换公网地址；留空则共用本机默认源地址。
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                  <div class="form-grid">
-                    <div class="field full">
-                      <label class="check">
-                        <input id="c-warp-enabled" type="checkbox" />
-                        <span data-i18n="config.warp.enabled">免费模型流量通过 WARP 出口</span>
-                      </label>
-                    </div>
-                    <div class="field">
-                      <label for="c-warp-pool" data-i18n="config.warp.pool">WARP 出口上限</label>
-                      <input id="c-warp-pool" type="number" min="1" max="32" step="1" />
-                      <p class="section-caption" data-i18n="config.warp.pool.hint">
-                        上限而非固定值：第一个出口就绪后，后台预注册一半（至少 1 个）作为暖池；活跃出口随并发调整（每个在途请求一个，另留一个备用），空闲 60 秒后回收多余出口。
-                      </p>
-                    </div>
-                    <div class="field">
-                      <label for="c-warp-stack" data-i18n="config.warp.stack">网络栈</label>
-                      <select id="c-warp-stack">
-                        <option value="ipv6">IPv6</option>
-                        <option value="ipv4">IPv4</option>
-                        <option value="dual" data-i18n="config.warp.stack.dual">双栈</option>
-                      </select>
-                    </div>
-                    <div class="field full">
-                      <label for="c-warp-source" data-i18n="config.warp.source">外层 IPv6 源前缀（/64）</label>
-                      <input id="c-warp-source" placeholder="2001:db8:1::/64" />
-                      <p class="section-caption" data-i18n="config.warp.source.hint">
-                        仅在使用 IPv6 网络栈时生效。每个 WARP 出口从该前缀取一个源地址出网，换出口即换公网地址；留空则共用本机默认源地址。
-                      </p>
-                    </div>
-                  </div>
-                </section>
+                  </section>
+                </div>
               </div>
 
               <div data-panel="upstream" class="stack hidden" role="tabpanel">

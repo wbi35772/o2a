@@ -304,6 +304,7 @@ textarea {
 .pager {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--sp-3);
   margin-top: var(--sp-3);
 }
@@ -312,6 +313,11 @@ textarea {
   color: var(--text-2);
   font-size: var(--fs-sm);
   white-space: nowrap;
+}
+
+.pager-size {
+  width: auto;
+  min-width: 68px;
 }
 
 .code-card {
@@ -530,11 +536,11 @@ progress::-moz-progress-bar {
   gap: var(--sp-1);
   border-bottom: 1px solid var(--border-1);
   overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .tab {
   padding: 7px var(--sp-3) 9px;
-  margin-bottom: -1px;
   border: 0;
   border-bottom: 2px solid transparent;
   background: transparent;

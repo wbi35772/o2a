@@ -41,11 +41,16 @@ export async function api(path, options = {}) {
   return data;
 }
 
-// Client-facing API base derived from the configured listen address.
+// Client-facing API base derived from the configured listen address. When the
+// UI and the API share a listener the page's own origin is exactly right,
+// which also covers a reverse proxy that terminates TLS on 443 while the
+// container listens on another port.
 export function derivedAPIBase() {
   const config = store.get("config");
+  if (config?.effective?.same_port) return location.origin;
   const listen = config?.effective?.listen || config?.listen || ":8080";
   const match = listen.match(/^\[.*\]:(\d+)$/) || listen.match(/:(\d+)$/);
   const port = match?.[1] || "8080";
-  return `${location.protocol}//${location.hostname}:${port}`;
+  const defaultPort = (location.protocol === "https:" && port === "443") || (location.protocol === "http:" && port === "80");
+  return defaultPort ? `${location.protocol}//${location.hostname}` : `${location.protocol}//${location.hostname}:${port}`;
 }

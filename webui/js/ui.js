@@ -191,10 +191,11 @@ export function promptDialog({
   });
 }
 
-// Tab strip wiring: [data-tab] buttons toggle [data-panel] panels and report
-// the active id.
+// Tab strip wiring: only the page-level strip ([data-tab] inside .page-tabs)
+// toggles [data-panel] panels. Nested strips own their own panels so they do
+// not steal each other's state.
 export function bindTabs(page, onSwitch) {
-  const buttons = $$(".tabs .tab", page);
+  const buttons = $$(".page-tabs .tab", page);
   const panels = $$("[data-panel]", page);
   const activate = (id) => {
     for (const button of buttons) {
