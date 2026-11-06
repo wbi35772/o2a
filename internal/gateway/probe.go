@@ -240,7 +240,7 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 	if overWARP {
 		// The probe context already bounds the attempt; no first-event or
 		// attempt deadline applies on top of it.
-		resp, _, err = g.doWARPAttempt(ctx, req, baseURL, model, 0, false)
+		resp, _, err = g.doWARPAttempt(ctx, req, baseURL, model, 0, false, "")
 	} else {
 		resp, err = client.Do(req)
 	}

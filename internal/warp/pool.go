@@ -23,6 +23,12 @@ const DefaultPoolSize = 2
 // is inventory, not waste: preload the whole configured pool when possible.
 const maxPreload = 32
 
+// maxAffinity bounds the conversation→exit map. A gateway that runs for weeks
+// sees far more conversations than exits, so the map is capped and one entry is
+// dropped at random when it fills; an evicted conversation simply lands on the
+// ring again.
+const maxAffinity = 4096
+
 // egressCooldown keeps a public /64 (or IPv4 /32) that the upstream has
 // rejected out of the pool for this long. The free tier scopes its quota to
 // that block, so a new tunnel inside it would only repeat the same answer.
@@ -143,6 +149,7 @@ type Pool struct {
 
 	mu        sync.Mutex
 	active    []*exit
+	affinity  map[string]*exit
 	inflight  int
 	waiting   int
 	next      int
@@ -292,6 +299,7 @@ func newPool(ctx context.Context, log logger, size int, statePath string, create
 		preload:   preload,
 		statePath: statePath,
 		newExit:   create,
+		affinity:  make(map[string]*exit),
 		reserved:  make(map[string]bool),
 		cooling:   cooling,
 		known:     known,
@@ -391,11 +399,34 @@ func (p *Pool) desiredLocked() int {
 }
 
 func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
+	return p.AcquireFor(ctx, "")
+}
+
+// AcquireFor leases an exit, preferring the one already serving affinity (the
+// conversation key). The free tier ledgers its quota against the pair (session,
+// egress), so a conversation that hops exits looks spent to every fresh one and
+// answers 429 on the first attempt of every turn. Pinning the conversation to a
+// single exit removes that pattern; an empty affinity keeps the old
+// round-robin behavior for keyed and probe traffic.
+func (p *Pool) AcquireFor(ctx context.Context, affinity string) (*Lease, error) {
 	for {
 		p.mu.Lock()
 		if p.closed {
 			p.mu.Unlock()
 			return nil, ErrClosed
+		}
+		if affinity != "" {
+			if bound := p.affinity[affinity]; bound != nil {
+				if p.activeIndexLocked(bound) >= 0 && bound.addRef() {
+					p.inflight++
+					p.mu.Unlock()
+					// Demand just rose: grow the ring toward it in the background.
+					p.startRefill()
+					return &Lease{pool: p, exit: bound}, nil
+				}
+				// The exit was retired while this conversation was idle.
+				delete(p.affinity, affinity)
+			}
 		}
 		for attempts := 0; attempts < len(p.active); attempts++ {
 			index := p.next % len(p.active)
@@ -403,6 +434,9 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 			active := p.active[index]
 			if active.addRef() {
 				p.inflight++
+				if affinity != "" {
+					p.bindAffinityLocked(affinity, active)
+				}
 				p.mu.Unlock()
 				// Demand just rose: grow the ring toward it in the background.
 				p.startRefill()
@@ -1078,6 +1112,19 @@ func (p *Pool) activeIndexLocked(target *exit) int {
 		}
 	}
 	return -1
+}
+
+// bindAffinityLocked remembers which exit serves one conversation. The map is
+// bounded: when it is full, an arbitrary conversation loses its pin and the
+// next turn re-binds through the ring, which is no worse than the old behavior.
+func (p *Pool) bindAffinityLocked(affinity string, e *exit) {
+	if _, exists := p.affinity[affinity]; !exists && len(p.affinity) >= maxAffinity {
+		for key := range p.affinity {
+			delete(p.affinity, key)
+			break
+		}
+	}
+	p.affinity[affinity] = e
 }
 
 func (p *Pool) needsRefillLocked() bool {
