@@ -17,6 +17,7 @@ const state = {
   panel: "nodes",
   cfEditing: "",
   egressPick: null,
+  health: null,
 };
 
 const statusText = () => ({
@@ -154,6 +155,15 @@ function quotaLabel(node) {
   return label;
 }
 
+async function loadHealth() {
+  try {
+    state.health = await api("/healthz");
+    if (state.store) renderOverview();
+  } catch {
+    /* health is advisory; the node pool still renders without it */
+  }
+}
+
 async function loadStore() {
   const store = await api("/api/proxy");
   if (!hasSession()) return;
@@ -208,8 +218,11 @@ function renderOverview() {
   host.replaceChildren();
   const rt = store.runtime || {};
   const counts = rt.statuses || {};
+  const w = state.health?.warp || {};
   host.append(
-    fact(t("出口总数", "proxy.fact.total"), rt.proxylines ?? 0),
+    fact(t("WARP 池（免费模型）", "proxy.fact.warp"), w.size ? `${w.active ?? 0} / ${w.size}` : "—"),
+    fact(t("WARP 待命 / 冷却", "proxy.fact.warpPool"), w.size ? `${w.standby ?? 0} / ${w.cooling ?? 0}` : "—"),
+    fact(t("节点池节点", "proxy.fact.total"), rt.proxylines ?? 0),
     fact(t("可用", "proxy.fact.alive"), counts.alive ?? 0),
     fact(t("限流", "proxy.fact.limited"), counts.limited ?? 0),
     fact(t("不通", "proxy.fact.dead"), counts.dead ?? 0),
@@ -334,7 +347,7 @@ function renderNodes() {
 
 async function refreshAll() {
   try {
-    await Promise.all([loadStore(), loadNodes()]);
+    await Promise.all([loadStore(), loadNodes(), loadHealth()]);
   } catch (error) {
     toast(error.message, true);
   }
