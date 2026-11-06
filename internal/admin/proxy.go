@@ -368,7 +368,13 @@ func mergeListeners(store *ProxyStore, listeners []proxyListener, selected map[s
 
 func (a *Server) proxyRuntime(store ProxyStore) proxyRuntime {
 	rt := proxyRuntime{LastSync: store.SyncedAt, LastSyncFail: store.SyncError, Statuses: map[string]int{}}
-	if pidData, err := os.ReadFile(filepath.Join(a.proxyDir(), "mihomo.pid")); err == nil {
+	// proxyctl writes its pid file beside the fleet in the work directory;
+	// older sidecars left it in proxycenter, so fall back there.
+	pidPath := filepath.Join(a.proxyWorkDir(), "mihomo.pid")
+	if _, err := os.Stat(pidPath); err != nil {
+		pidPath = filepath.Join(a.proxyDir(), "mihomo.pid")
+	}
+	if pidData, err := os.ReadFile(pidPath); err == nil {
 		rt.MihomoPID, _ = strconv.Atoi(strings.TrimSpace(string(pidData)))
 	}
 	if rt.MihomoPID > 0 {
