@@ -87,6 +87,12 @@ type WarpConfig struct {
 	// way to mint fresh egress blocks when the direct route is spent. The
 	// WireGuard data plane still leaves from this host.
 	RegistrationProxies []string `json:"registration_proxies,omitempty"`
+	// DirectFallback lets the free lane leave from the host's own address when
+	// the WARP pool cannot serve it (no warm exit, or every exit spent). The
+	// warp mode turns it on because the host address is an independent free
+	// quota; warp-only leaves it off so that mode never leaks traffic onto the
+	// host egress.
+	DirectFallback bool `json:"direct_fallback,omitempty"`
 }
 
 // Normalize fills the defaults and canonicalizes the stack name.

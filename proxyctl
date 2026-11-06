@@ -235,7 +235,8 @@ write_config() {
     case "$mode" in
         direct)
             # No proxy fleet and no WARP: everything uses the container egress.
-            jq '.warp.enabled = false | .warp.registration_proxies = []
+            jq '.warp.enabled = false | .warp.direct_fallback = false
+                | .warp.registration_proxies = []
                 | .proxies = [] | .proxyfile = ""' \
                 "$config_path" > "$config_path.tmp" && mv "$config_path.tmp" "$config_path"
             ;;
@@ -245,21 +246,24 @@ write_config() {
             # proxyfile is loaded.
             jq --rawfile pf "$work_dir/proxies.txt" \
                 '.warp.registration_proxies = ($pf | split("\n") | map(select(length > 0) | split("#")[0]))
-                 | .warp.enabled = true | .proxies = [] | .proxyfile = ""' \
+                 | .warp.enabled = true | .warp.direct_fallback = false
+                 | .proxies = [] | .proxyfile = ""' \
                 "$config_path" > "$config_path.tmp" && mv "$config_path.tmp" "$config_path"
             ;;
         warp)
             # Free-model traffic uses WARP; keyed Go/paid traffic keeps the
             # proxy fleet.
             jq --arg pf "$work_dir/proxies.txt" \
-                '.warp.enabled = true | .warp.registration_proxies = []
+                '.warp.enabled = true | .warp.direct_fallback = true
+                 | .warp.registration_proxies = []
                  | .proxies = [] | .proxyfile = $pf' \
                 "$config_path" > "$config_path.tmp" && mv "$config_path.tmp" "$config_path"
             ;;
         *)
             # proxy: the whole gateway uses the fleet and WARP stays off.
             jq --arg pf "$work_dir/proxies.txt" \
-                '.warp.enabled = false | .warp.registration_proxies = []
+                '.warp.enabled = false | .warp.direct_fallback = false
+                 | .warp.registration_proxies = []
                  | .proxies = [] | .proxyfile = $pf' \
                 "$config_path" > "$config_path.tmp" && mv "$config_path.tmp" "$config_path"
             ;;

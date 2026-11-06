@@ -82,6 +82,10 @@ type Gateway struct {
 	// traffic on the anonymous lane and the Zen key tier leaves through it
 	// instead of the configured proxies and transports.
 	warp *warp.Pool
+	// directTransport is the host-egress route behind the warp-mode direct
+	// fallback. It never proxies and is kept separate from the configured
+	// fleet so a fleet entry can never stand in for the host address.
+	directTransport *proxyTransport
 	// sessions tracks the free-tier session generation per client
 	// conversation. A spent session gets a new id instead of burning an exit.
 	sessions     *sessionGuard
@@ -113,6 +117,10 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, war
 	if err != nil {
 		return nil, err
 	}
+	directTransports, err := transportPool([]string{"direct"}, cfg.Performance, cfg.Performance.AttemptTimeout(time.Duration(cfg.Retry.TimeoutSeconds)*time.Second))
+	if err != nil {
+		return nil, err
+	}
 	cooldown := time.Duration(cfg.Performance.FailureCooldownSeconds) * time.Second
 	zenNodes, err := nodePool(cfg.ZenKeys, transports, cooldown)
 	if err != nil {
@@ -126,19 +134,20 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, war
 	catalog.SetRefreshInterval(time.Duration(cfg.Models.RefreshSeconds) * time.Second)
 	catalog.SetFreeOnly(cfg.Models.FreeOnly)
 	return &Gateway{
-		cfg:            cfg,
-		rotation:       rotationManager,
-		logger:         logger,
-		transports:     transports,
-		zenNodes:       zenNodes,
-		goNodes:        goNodes,
-		anonymous:      anonymousPool(cfg.Anonymous, transports, cooldown, anonymousBackoffFromConfig(cfg.Models.AnonymousBackoff)),
-		warp:           warpPool,
-		sessions:       newSessionGuard(),
-		catalog:        catalog,
-		monitor:        monitor,
-		attemptTimeout: attemptDeadline(cfg),
-		freeTierBlock:  time.Duration(cfg.Performance.FreeTierBlockSeconds) * time.Second,
+		cfg:             cfg,
+		rotation:        rotationManager,
+		logger:          logger,
+		transports:      transports,
+		zenNodes:        zenNodes,
+		goNodes:         goNodes,
+		anonymous:       anonymousPool(cfg.Anonymous, transports, cooldown, anonymousBackoffFromConfig(cfg.Models.AnonymousBackoff)),
+		warp:            warpPool,
+		directTransport: directTransports.items[0],
+		sessions:        newSessionGuard(),
+		catalog:         catalog,
+		monitor:         monitor,
+		attemptTimeout:  attemptDeadline(cfg),
+		freeTierBlock:   time.Duration(cfg.Performance.FreeTierBlockSeconds) * time.Second,
 	}, nil
 }
 

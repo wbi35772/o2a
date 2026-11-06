@@ -381,6 +381,99 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 	if halted {
 		return lastResponse, errDeterministicClientRejection, attempts
 	}
+	// The pool cannot serve this request, but another egress can: a warp-mode
+	// gateway may fall back to the host address, whose free quota is metered
+	// independently of every WARP exit. warp-only keeps this off, so an
+	// operator who asked for WARP-only egress still gets the 503 instead of a
+	// silent leak onto the host address. The pass reuses the prepared bodies
+	// and the session the WARP attempts already rotated, so it costs at most
+	// two requests.
+	if g.cfg.Warp.DirectFallback && g.directTransport != nil && ctx.Err() == nil &&
+		(blocked || errors.Is(lastErr, errWARPUnavailable)) {
+		if lastResponse != nil {
+			httpx.DrainAndClose(lastResponse.Body)
+			lastResponse = nil
+		}
+		g.logger.Warn("WARP egress cannot serve the request; falling back to the host egress", "component", "upstream", "event", "warp_direct_fallback", "request_id", ids.Request, "attempts", attempts, "blocked", blocked)
+		blocked = false
+		lastErr = nil
+		for index, baseURL := range upstreams {
+			if ctx.Err() != nil {
+				if lastErr == nil {
+					lastErr = ctx.Err()
+				}
+				break
+			}
+			for round := 0; round < 2; round++ {
+				if ctx.Err() != nil {
+					if lastErr == nil {
+						lastErr = ctx.Err()
+					}
+					break
+				}
+				setRequestShape(ctx, false, renames[index])
+				attempts++
+				if meta := telemetry.MetaFromContext(ctx); meta != nil {
+					meta.Attempts = attemptOffset + attempts
+					meta.Tier = string(config.TierZen)
+				}
+				if lastResponse != nil {
+					httpx.DrainAndClose(lastResponse.Body)
+					lastResponse = nil
+				}
+				req, err := upstreamRequest(ctx, baseURL, protocol, prepared[index], currentIDs, anonymousZenKey)
+				if err != nil {
+					return nil, err, attempts
+				}
+				setRequestCredential(ctx, config.TierZen, "anonymous", "anonymous", true, nil)
+				setWarpEgress(ctx, "direct")
+				started := time.Now()
+				resp, err := doInferenceAttempt(g.inferenceClient(g.directTransport, baseURL, route.ID), req, firstEventTimeout, g.attemptTimeout)
+				duration := time.Since(started)
+				status := upstreamStatus(resp)
+				g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, warpProxy("direct"), resp, err, duration)
+				if err == nil && status/100 == 2 {
+					g.anonymous.NoteSuccess()
+					g.logger.Debug("anonymous direct fallback accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", "direct", "status", status, "duration_ms", duration.Milliseconds())
+					return resp, nil, attempts
+				}
+				lastResponse, lastErr = resp, err
+				if err != nil {
+					g.logger.Debug("anonymous direct fallback attempt failed", "component", "upstream", "event", "anonymous_attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", "direct", "duration_ms", duration.Milliseconds(), "error", err)
+					break
+				}
+				body := peekResponseBody(resp)
+				if status == http.StatusTooManyRequests {
+					if isFreeUsageLimitBody(body) {
+						blocked = true
+						g.logger.Warn("free tier usage limit reached on the direct fallback", "component", "upstream", "event", "free_usage_limit_reached", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", "direct", "retry_after", resp.Header.Get("Retry-After"))
+						break
+					}
+					// A 429 may belong to a spent conversation rather than to
+					// the host address: rotate once and retry the same gate.
+					if round == 0 {
+						previousSession := currentIDs.Session
+						currentIDs = g.sessions.RotateIDs(baseIDs)
+						g.logger.Info("free tier 429 on the direct fallback; rotating the session identity", "component", "upstream", "event", "session_identity_rotated", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", "direct", "from_session", previousSession, "to_session", currentIDs.Session)
+						continue
+					}
+					break
+				}
+				if peekNetworkAbuseBlock(resp) {
+					blocked = true
+					break
+				}
+				if isDeterministicClientResponse(status, body) {
+					halted = true
+					break
+				}
+				break
+			}
+			if blocked || halted || ctx.Err() != nil {
+				break
+			}
+		}
+	}
 	if lastResponse != nil {
 		if blocked {
 			return lastResponse, errFreeTierIPBlocked, attempts
