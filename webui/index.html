@@ -850,25 +850,21 @@
               </div>
               <div id="proxy-cards" class="facts"></div>
               <p id="proxy-status" class="section-caption" role="status"></p>
-              <div class="form-grid">
-                <div class="field">
-                  <label for="proxy-egress-mode" data-i18n="proxy.mode.label">出口方式</label>
-                  <select id="proxy-egress-mode">
-                    <option value="proxy" data-i18n="proxy.mode.proxy">代理池（全部流量）</option>
-                    <option value="warp" data-i18n="proxy.mode.warp">WARP（仅免费模型）</option>
-                    <option value="warp-only" data-i18n="proxy.mode.warpOnly">WARP（免费模型，其余直连）</option>
-                    <option value="direct" data-i18n="proxy.mode.direct">直连（不使用代理）</option>
-                  </select>
+              <div class="egress-head">
+                <div>
+                  <span class="egress-current-label" data-i18n="proxy.mode.currentLabel">当前生效</span>
+                  <strong id="proxy-mode-current">—</strong>
                 </div>
-                <div class="field">
-                  <label data-i18n="proxy.mode.currentLabel">当前生效</label>
-                  <div class="actions">
-                    <span id="proxy-mode-current">—</span>
-                    <button id="proxy-mode-apply" type="button" class="btn btn-sm btn-primary" data-i18n="proxy.mode.apply">应用出口方式</button>
-                  </div>
-                </div>
+                <button id="proxy-mode-apply" type="button" class="btn btn-sm btn-primary" data-i18n="proxy.mode.apply">应用出口方式</button>
               </div>
+              <div id="proxy-egress-options" class="egress-grid" role="radiogroup" aria-label="出口方式"></div>
               <p id="proxy-mode-note" class="section-caption"></p>
+              <select id="proxy-egress-mode" class="hidden" tabindex="-1" aria-hidden="true">
+                <option value="proxy" data-i18n="proxy.mode.proxy">代理池（全部流量）</option>
+                <option value="warp" data-i18n="proxy.mode.warp">WARP（仅免费模型）</option>
+                <option value="warp-only" data-i18n="proxy.mode.warpOnly">WARP（免费模型，其余直连）</option>
+                <option value="direct" data-i18n="proxy.mode.direct">直连（不使用代理）</option>
+              </select>
             </section>
 
             <section class="section">
@@ -881,6 +877,7 @@
               </div>
 
               <div data-proxy-panel="nodes" class="stack" role="tabpanel">
+                <p id="proxy-node-role" class="role-bar" role="status"></p>
                 <div class="form-grid">
                   <div class="field">
                     <label for="proxy-filter-status" data-i18n="proxy.filter.status">状态</label>
@@ -1174,7 +1171,6 @@
                 <div id="config-proxy-tabs" class="tabs subtabs" role="tablist" aria-label="代理分区">
                   <button class="tab active" type="button" data-config-proxy-tab="nodes" role="tab" aria-selected="true" data-i18n="config.proxy.tab.nodes">Proxy 节点</button>
                   <button class="tab" type="button" data-config-proxy-tab="center" role="tab" aria-selected="false" data-i18n="config.proxy.tab.center">代理中心</button>
-                  <button class="tab" type="button" data-config-proxy-tab="warp" role="tab" aria-selected="false" data-i18n="config.warp.title">WARP 出口</button>
                 </div>
                 <div data-config-proxy-panel="nodes" class="stack" role="tabpanel">
                   <section class="section">
@@ -1201,48 +1197,6 @@
                 </div>
                 <div data-config-proxy-panel="center" class="stack hidden" role="tabpanel">
                   <div id="config-proxy-center"></div>
-                </div>
-                <div data-config-proxy-panel="warp" class="stack hidden" role="tabpanel">
-                  <section class="section">
-                    <div class="section-head">
-                      <div>
-                        <h2 class="section-title" data-i18n="config.warp.title">WARP 出口</h2>
-                        <p class="section-caption" data-i18n="config.warp.caption">
-                          开启后，免费模型流量（匿名通道、免费模型 Zen Key、免费模型探测）改走用户态 WARP，不再使用任何 Proxy；Go 套餐与付费模型保持不变。出口收到 429/403 立即淘汰并在后台重新注册，免费模型请求持续轮换出口，用完 retry.max_attempts 次后才把最后一个 429 返回客户端。
-                        </p>
-                      </div>
-                    </div>
-                    <div class="form-grid">
-                      <div class="field full">
-                        <label class="check">
-                          <input id="c-warp-enabled" type="checkbox" />
-                          <span data-i18n="config.warp.enabled">免费模型流量通过 WARP 出口</span>
-                        </label>
-                      </div>
-                      <div class="field">
-                        <label for="c-warp-pool" data-i18n="config.warp.pool">WARP 出口上限</label>
-                        <input id="c-warp-pool" type="number" min="1" max="32" step="1" />
-                        <p class="section-caption" data-i18n="config.warp.pool.hint">
-                          上限而非固定值：第一个出口就绪后，后台预注册一半（至少 1 个）作为暖池；活跃出口随并发调整（每个在途请求一个，另留一个备用），空闲 60 秒后回收多余出口。
-                        </p>
-                      </div>
-                      <div class="field">
-                        <label for="c-warp-stack" data-i18n="config.warp.stack">网络栈</label>
-                        <select id="c-warp-stack">
-                          <option value="ipv6">IPv6</option>
-                          <option value="ipv4">IPv4</option>
-                          <option value="dual" data-i18n="config.warp.stack.dual">双栈</option>
-                        </select>
-                      </div>
-                      <div class="field full">
-                        <label for="c-warp-source" data-i18n="config.warp.source">外层 IPv6 源前缀（/64）</label>
-                        <input id="c-warp-source" placeholder="2001:db8:1::/64" />
-                        <p class="section-caption" data-i18n="config.warp.source.hint">
-                          仅在使用 IPv6 网络栈时生效。每个 WARP 出口从该前缀取一个源地址出网，换出口即换公网地址；留空则共用本机默认源地址。
-                        </p>
-                      </div>
-                    </div>
-                  </section>
                 </div>
               </div>
 

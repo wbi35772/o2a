@@ -571,3 +571,89 @@ progress::-moz-progress-bar {
   border-top: 1px solid var(--border-1);
   background: var(--bg);
 }
+
+/* Egress picker: one routing decision, four explicit combinations. */
+.egress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-3);
+}
+
+.egress-current-label {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  margin-right: var(--sp-2);
+}
+
+.egress-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--sp-3);
+}
+
+.egress-option {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  text-align: left;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  color: var(--text-1);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.egress-option:hover {
+  border-color: var(--border-2);
+}
+
+.egress-option[aria-checked="true"] {
+  border-color: var(--text-1);
+  box-shadow: inset 0 0 0 1px var(--text-1);
+}
+
+.egress-option:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.egress-option-title {
+  font-weight: 600;
+  font-size: var(--fs-base);
+}
+
+.egress-option-row {
+  display: grid;
+  grid-template-columns: 4.5em 1fr;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+
+.egress-option-key {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.egress-option-role {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  border-top: 1px dashed var(--border-1);
+  padding-top: 6px;
+}
+
+.role-bar {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-left: 3px solid var(--text-1);
+  background: var(--bg-subtle);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}

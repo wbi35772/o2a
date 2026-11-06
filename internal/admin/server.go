@@ -228,12 +228,14 @@ type SecretInput struct {
 // value or the ID of the existing one. The WebUI username and password are
 // not changed here; they go through /api/account.
 type ConfigUpdate struct {
-	Listen      string                   `json:"listen"`
-	ServerKeys  []SecretInput            `json:"server_keys"`
-	ZenKeys     []SecretInput            `json:"zen_keys"`
-	GoKeys      []SecretInput            `json:"go_keys"`
-	Anonymous   bool                     `json:"anonymous"`
-	Warp        config.WarpConfig        `json:"warp"`
+	Listen     string        `json:"listen"`
+	ServerKeys []SecretInput `json:"server_keys"`
+	ZenKeys    []SecretInput `json:"zen_keys"`
+	GoKeys     []SecretInput `json:"go_keys"`
+	Anonymous  bool          `json:"anonymous"`
+	// A pointer keeps an omitted warp block from erasing the current WARP
+	// configuration when a client saves only the other sections.
+	Warp        *config.WarpConfig       `json:"warp,omitempty"`
 	Proxies     []SecretInput            `json:"proxies"`
 	ProxyFile   string                   `json:"proxyfile"`
 	Upstream    config.UpstreamConfig    `json:"upstream"`
@@ -289,10 +291,14 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	if update.Reasoning != nil {
 		reasoning = *update.Reasoning
 	}
+	warpConfig := current.Warp
+	if update.Warp != nil {
+		warpConfig = *update.Warp
+	}
 	candidate := config.Config{
 		ServerKeyMetadata: current.ServerKeyMetadata,
 		Rotation:          current.Rotation,
-		Listen:            update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, Warp: update.Warp, Proxies: proxies, ProxyFile: update.ProxyFile,
+		Listen:            update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, Warp: warpConfig, Proxies: proxies, ProxyFile: update.ProxyFile,
 		Upstream: update.Upstream, Retry: update.Retry, Models: update.Models, Performance: update.Performance, Logging: update.Logging, Prefer: update.Prefer,
 		Reasoning: reasoning,
 		WebUI:     config.WebUIConfig{Enabled: update.WebUI.Enabled, Listen: update.WebUI.Listen, Username: current.WebUI.Username, PasswordHash: current.WebUI.PasswordHash, SessionTTLMinutes: update.WebUI.SessionTTLMinutes},

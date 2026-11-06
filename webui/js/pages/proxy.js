@@ -16,6 +16,7 @@ const state = {
   timer: null,
   panel: "nodes",
   cfEditing: "",
+  egressPick: null,
 };
 
 const statusText = () => ({
@@ -51,8 +52,55 @@ const egressNote = () => ({
   direct: t("全部流量直连，不使用 WARP 和代理池。", "proxy.mode.note.direct"),
 });
 
+const egressSpecs = () => [
+  {
+    mode: "proxy",
+    title: t("代理池", "proxy.mode.short.proxy"),
+    free: t("代理池", "proxy.flow.pool"),
+    other: t("代理池", "proxy.flow.pool"),
+    role: t("承载全部流量", "proxy.role.proxy"),
+  },
+  {
+    mode: "warp",
+    title: t("WARP", "proxy.mode.short.warp"),
+    free: t("WARP，失败时直连兜底", "proxy.flow.warpFallback"),
+    other: t("代理池", "proxy.flow.pool"),
+    role: t("只承载其它流量", "proxy.role.warp"),
+  },
+  {
+    mode: "warp-only",
+    title: t("仅 WARP", "proxy.mode.short.warpOnly"),
+    free: t("WARP", "proxy.flow.warp"),
+    other: t("直连", "proxy.flow.direct"),
+    role: t("仅用于注册 WARP", "proxy.role.warpOnly"),
+  },
+  {
+    mode: "direct",
+    title: t("直连", "proxy.mode.short.direct"),
+    free: t("直连", "proxy.flow.direct"),
+    other: t("直连", "proxy.flow.direct"),
+    role: t("不参与", "proxy.role.direct"),
+  },
+];
+
+const egressRoleText = () => ({
+  proxy: t(
+    "当前模式「代理池」：本页节点承载全部流量，免费模型和其它流量都从这里出网。",
+    "proxy.nodeRole.proxy",
+  ),
+  warp: t(
+    "当前模式「WARP」：本页节点只承载其它流量；免费模型走 WARP，WARP 全部不可用时回落直连。",
+    "proxy.nodeRole.warp",
+  ),
+  "warp-only": t(
+    "当前模式「仅 WARP」：本页节点仅用于给 WARP 注册新出口，不承载任何业务流量。",
+    "proxy.nodeRole.warpOnly",
+  ),
+  direct: t("当前模式「直连」：本页节点未参与任何流量。", "proxy.nodeRole.direct"),
+});
+
 function currentEgressMode() {
-  return state.store?.settings?.egress_mode || "proxy";
+  return state.egressPick || state.store?.settings?.egress_mode || "proxy";
 }
 
 function renderEgressMode() {
@@ -60,6 +108,42 @@ function renderEgressMode() {
   $("#proxy-egress-mode").value = mode;
   $("#proxy-mode-current").textContent = egressText()[mode] || mode;
   $("#proxy-mode-note").textContent = egressNote()[mode] || "";
+  $("#proxy-node-role").textContent = egressRoleText()[mode] || "";
+  const host = $("#proxy-egress-options");
+  if (!host) return;
+  host.replaceChildren();
+  for (const spec of egressSpecs()) {
+    const card = el(
+      "button",
+      {
+        type: "button",
+        class: "egress-option",
+        role: "radio",
+        "aria-checked": spec.mode === mode ? "true" : "false",
+        dataset: { mode: spec.mode },
+      },
+      [
+        el("span", { class: "egress-option-title", text: spec.title }),
+        el("span", { class: "egress-option-row" }, [
+          el("span", { class: "egress-option-key", text: t("免费模型", "proxy.flow.free") }),
+          el("span", { text: spec.free }),
+        ]),
+        el("span", { class: "egress-option-row" }, [
+          el("span", { class: "egress-option-key", text: t("其它流量", "proxy.flow.other") }),
+          el("span", { text: spec.other }),
+        ]),
+        el("span", {
+          class: "egress-option-role",
+          text: `${t("节点页", "proxy.flow.nodes")}：${spec.role}`,
+        }),
+      ],
+    );
+    card.addEventListener("click", () => {
+      state.egressPick = spec.mode;
+      renderEgressMode();
+    });
+    host.append(card);
+  }
 }
 
 
@@ -503,6 +587,8 @@ async function applyEgressMode() {
     else toast(t("正在切换出口方式…", "toast.proxy.modeSwitching"));
     await refreshAll();
   } catch (error) {
+    state.egressPick = null;
+    renderEgressMode();
     toast(error.message, true);
   } finally {
     button.disabled = false;
@@ -629,6 +715,7 @@ export default {
     showPanel(state.panel);
     onChange(() => {
       if (state.store) renderOverview();
+      if (state.store) renderEgressMode();
     });
   },
   show() {
