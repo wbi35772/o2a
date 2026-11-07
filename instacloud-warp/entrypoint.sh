@@ -179,7 +179,7 @@ render_conf() {
 
 [Socks5]
 BindAddress = 0.0.0.0:${port}
-Username = ${SOCK_USER}
+Username = ${SOCKS_USER}
 Password = ${SOCKS_PASS}
 EOF
 
@@ -236,7 +236,7 @@ probe() {
   ip=$(printf '%s\n' "$body" | awk -F= '$1=="ip" { print $2; exit }')
   loc=$(printf '%s\n' "$body" | awk -F= '$1=="loc" { print $2; exit }')
   [[ -n "$ip" ]] || return 1
-  prefix=$(printf '%s' "$ip" | awk -F: 'NF<=4 { print $1":"$2":"$3":"$4 }')
+  prefix=$(printf '%s' "$ip" | awk -F: 'NF>=4 { print $1":"$2":"$3":"$4 }')
   [[ -n "$prefix" ]] || return 1
   printf '%s\t%s\t%s\n' "$prefix" "$ip" "$loc"
 }
@@ -379,7 +379,9 @@ reroll_instance() {
 }
 
 recover_account() {
-  local i=$1 dir=$(inst_dir "$i") port=$(port_for "$i")
+  local i=$1 dir port
+  dir=$(inst_dir "$i")
+  port=$(port_for "$i")
   log "recover $(basename "$dir"): endpoint rerolls exhausted, re-registering a fresh account"
   stop_wireproxy "$dir"
   rm -f "$dir/wgcf-account.toml" "$dir/wgcf-profile.conf"
@@ -402,7 +404,9 @@ dedup_pass() {
     while :; do
       res=""
       res=$(probe "$port" 2>/dev/null || true)
-      prefix="", ip="", loc=""
+      prefix=""
+      ip=""
+      loc=""
       if [[ -n "$res" ]]; then
         IFS=$'\t' read -r prefix ip loc <<<"$res" || true
       fi
