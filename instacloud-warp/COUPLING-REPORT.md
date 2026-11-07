@@ -326,6 +326,8 @@ sudo bash scripts/firewall-allow-center.sh
 bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 ```
 
+无公网入站时（PaaS/NAT），跳过 `firewall-allow-center.sh`，用 `scripts/bore-supervisor.sh` 把 `127.0.0.1:1081..1096` 映射到 `BORE_SERVER:BORE_PORT_START..`，并把清单换成中继地址；详见 README「无公网入站：bore 中继」。
+
 ### 9.2 旧 main（模式 A）
 
 1. 把 16 行清单写入中心容器 `proxyfile` 指向的路径（无 `#`）。

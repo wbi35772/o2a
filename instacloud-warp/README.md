@@ -26,6 +26,7 @@ warp-pool-producer/
 ├── patches/wgcf-socks5-proxy.patch
 ├── scripts/export-egress.sh       # 一键导出 + --verify 自检
 ├── scripts/firewall-allow-center.sh
+├── scripts/bore-supervisor.sh     # NAT/PaaS 无公网入站时的 bore 中继保活
 ├── .env.example
 ├── Makefile
 └── README.md
@@ -34,7 +35,7 @@ warp-pool-producer/
 ## 前置条件
 
 - 异国 Linux VPS（JP / KR / GB / AU），已安装 Docker 与 compose v2。
-- 节点有公网 IPv4，供中心三台容器连接。
+- 节点有公网 IPv4，或可用 bore 中继（见「无公网入站：bore 中继」）。
 - 出站 UDP 到 Cloudflare Anycast 的 `2408 / 500 / 1701 / 4500` 未被封。
 - 不需要宿主机 IPv6、不需要 TUN、不需要 `--privileged`。
 - 必须部署在 Linux 上：`network_mode: host` 在 Docker Desktop（Windows/macOS）不适用。
@@ -83,6 +84,25 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --out egress-ext.txt
 # --verify 会从 127.0.0.1 逐个探测，必须在节点本机执行
 bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 ```
+
+### 无公网入站：bore 中继（可选）
+
+PaaS/免费容器常没有可入站公网端口。此时让 producer 继续监听 `127.0.0.1:1081..1096`，用 `bore` 把每个端口映射到公网中继：
+
+```bash
+# 默认 127.0.0.1:1081-1096 -> bore.pub:40001-40016
+nohup bash scripts/bore-supervisor.sh > /tmp/bore-supervisor.out 2>&1 &
+
+# 自定义端口段（例如第二节点）
+PORT_START=2081 PORT_END=2096 BORE_PORT_START=41001 \
+  nohup bash scripts/bore-supervisor.sh > /tmp/bore-supervisor.out 2>&1 &
+```
+
+- 映射是线性的：`remote = BORE_PORT_START + (local - PORT_START)`。
+- 脚本每 `CHECK_INTERVAL`（默认 30s）检查一次，只重启掉线的端口；pidfile 与日志在 `LOG_DIR`（默认 `/tmp`）。
+- 交给网关的清单改用中继地址：`socks5://warpuser:WarpPass2026@bore.pub:40001..40016`。
+- 免费 `bore.pub` 对同一源 IP 有并发隧道上限；16 条已接近上限。需要更多端口时换自建 `bore server`（`BORE_SERVER`）或分节点。
+- `bore` 二进制默认自动下载到 `/tmp/bore`；离线环境用 `BORE_BIN` 指定已有二进制。
 
 ## 配置项
 
@@ -231,6 +251,7 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 | 端口不监听 | `docker exec warp-pool-producer wireproxy -n -c /data/instances/nXX/wireproxy.conf` |
 | 中心连不上 | 检查 `EXTERNAL_HOST`、安全组、`firewall-allow-center.sh` 是否执行 |
 | `permission denied: /data` | 使用 named volume；bind mount 时把目录 `chown` 给容器内 `warp` 用户 |
+| bore 中继掉线 / 端口被占用 | `bore.pub` 对同源 IP 有并发上限；看 `/tmp/bore-<port>.log` 是否 `port already in use`；减少端口或换 `BORE_SERVER`，supervisor 会自动重试 |
 | Docker Desktop 上端口异常 | 本项目要求 Linux 主机 + host 网络 |
 
 ## 红线
