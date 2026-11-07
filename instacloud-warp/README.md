@@ -11,7 +11,7 @@
 | 出口 | 纯 IPv6（`AllowedIPs = ::/0`），禁止 IPv4 出口 |
 | 去重 | 同容器内 16 个端口的 `/64` 前缀互不相同 |
 | 存量 `/48` 禁区 | SIN `2a09:bac5:55*` / `2a09:bac1:65*`；IAD `2a09:bac5:c82*`；FRA `2a09:bac1:27b*` / `2a09:bac1:1e*` |
-| 换血周期 | `900` 秒（15 分钟，对齐网关免费层 IP 屏蔽 `free_tier_block_seconds=900`） |
+| 换血周期 | `900` 秒（15 分钟，对齐网关额度 429 硬冷却 `static_proxy_rate_limit_cooldown_seconds=900`；旧 main 的 `free_tier_block_seconds` 为死代码） |
 | 边界 | 不修改 opencode2api 任何代码 |
 
 ## 目录结构
@@ -92,7 +92,7 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 | `START_PORT` | `1081` | 首个 SOCKS5 端口 |
 | `POOL_SIZE` / `INSTANCE_COUNT` | `16` | 实例数（两变量等价，任一设置即可） |
 | `SOCKS_USER` / `SOCKS_PASS` | `warpuser` / `WarpPass2026` | SOCKS5 账密 |
-| `REROLL_INTERVAL` | `900` | 全量换血周期（秒），对齐网关免费层屏蔽窗口（`free_tier_block_seconds=900`） |
+| `REROLL_INTERVAL` | `900` | 全量换血周期（秒），对齐网关额度 429 硬冷却（`static_proxy_rate_limit_cooldown_seconds=900`） |
 | `REROLL_BATCH` | `4` | 换血每批实例数 |
 | `DEDUP_RETRIES` | `4` | 单个端口去重最大重试 |
 | `REGISTER_RETRIES` | `3` | 单个账号注册最大尝试 |
@@ -169,25 +169,47 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 
 4. `/48` 不重叠：`--verify` 会打印每个端口的 `/48` 并拒绝禁区家族。
 
-## 跨会话契约 v1.1（硬性）
+## 跨会话契约 v2（硬性）
 
-- 清单每行严格为 `socks5://USER:PASS@IP:PORT`，**绝不能**带任何 `#` 字符。网关会把含 `#pool` 的条目识别为动态池：不参与失败冷却（`MarkFailure` 直接返回）、每次尝试新建连接、并在池内循环抽取；只有纯静态条目才会进入失败冷却（15s 起、逐次翻倍、上限 8 倍）与免费层屏蔽（默认 900s）。
+- 清单每行严格为 `socks5://USER:PASS@IP:PORT`，**绝不能**带任何 `#` 字符。网关会把含 `#pool` 的条目识别为动态池：不参与失败冷却（`MarkFailure` 直接返回）、每次尝试新建连接、并在池内循环抽取；只有纯静态条目才会进入失败冷却与硬冷却。
 - `export-egress.sh` 写出后强制校验：文件出现 `#`、或有效 `socks5://` 行数不等于 `POOL_SIZE`，立即报错、删除输出并以非零退出。
-- 默认 `POOL_SIZE=16`（端口 `1081~1096`，是 `max_anonymous_exits=8` 的两倍冗余），`REROLL_INTERVAL=900` 秒，与网关免费层屏蔽窗口（默认 900s）对齐。
+- 默认 `POOL_SIZE=16`（端口 `1081~1096`，是 `max_anonymous_exits=8` 的两倍冗余），`REROLL_INTERVAL=900` 秒。
+- **固定端口、出口漂移**：网关清单的 `HOST:PORT` 不变，900s 换血只更换端口后面的 WARP 会话与 `/64`。因此换血**不需要网关重载**，也**不需要跨机定时同步清单**；只有节点公网 IP 或端口段变化时才更新 `proxyfile` 并 Reload。
+- 900s 与网关冷却对齐：
+  - 旧版 `main`：`free_tier_block_seconds` 是零调用死代码；静态条目 429 只走 `failure_cooldown_seconds` 的 15s 指数冷却（15/30/60/120s，上限 8×）。
+  - 新版 `warp-fusion`：`performance.static_proxy_rate_limit_cooldown_seconds = 900` 配合 `limitedUntil`，额度 429 时单端口硬冷却 15 分钟。
 
-## 交给会话 A
+## 交给会话 A（双模式）
 
-1. 将 `egress-ext.txt` 的 16 行写入中心容器 `/var/lib/opencode2api/egress-ext.txt`；文件内不得出现任何 `#` 字符。
-2. 中心侧连通性验证：
+### 模式 1：旧版 `main` 二进制（WARP 与静态池互斥）
 
-   ```bash
-   curl -sS -m 10 --socks5-hostname 'warpuser:WarpPass2026@NODE_PUBLIC_IP:1081' \
-     https://opencode.ai/cdn-cgi/trace
-   ```
+1. `warp.enabled = false`（设为 `true` 时免费模型流量全部走网关内置 WARP，`proxyfile` 被完全绕过）。
+2. `proxyfile` 指向 16 行清单；文件内不得出现任何 `#`。
+3. `performance.max_anonymous_exits = 8`（16 端口 = 2× 冗余）；`performance.failure_cooldown_seconds = 15`。
+4. `free_tier_block_seconds` 可填 `900` 但无效果（死代码），不要依赖它。
+5. 保存/Reload 后生效。
 
-3. 确认防火墙已放行 `13.229.234.225`、`18.212.22.159`、`3.79.179.114`。
-4. 网关侧：`warp.enabled` 必须为 `false`——设为 `true` 时免费模型流量全部改走网关内置 WARP，`proxyfile` 静态池会被完全绕过。`proxyfile` 指向该文件；`performance.max_anonymous_exits = 8`（16 端口 = 2× 冗余）；`performance.free_tier_block_seconds = 900`。
-5. `proxyfile` 只在配置加载/管理端 Reload 时读取（网关没有文件监视）。本清单 URL 恒定（出口在端口后漂移），换血无需重载；仅当节点公网 IP 或端口变化时，在 WebUI 保存配置或调用管理端 Reload。
+### 模式 2：新版 `warp-fusion` 二进制（双池融合）
+
+1. `warp.enabled = true`；`warp.pool_size = 4`（按机器规格调整）；`warp.stack = "ipv6"`；`warp.direct_fallback = false`。
+2. `anonymous = true`；`proxies = []`；`proxyfile` 指向 16 行清单。
+3. `performance.failure_cooldown_seconds = 15`；`performance.max_anonymous_exits = 0`（使用内置默认 8）；`performance.free_tier_block_seconds = 0`；`performance.static_proxy_rate_limit_cooldown_seconds = 900`。
+4. 保存/Reload 后，融合调度按容量选择顺序：一侧为空则让位；一侧容量 ≥2× 另一侧则优先该侧；否则交替。两池都额度耗尽时返回 `errFreeTierIPBlocked`。
+5. `warp.direct_fallback` 必须为 `false`：否则 WARP 失败会退回直连，绕过双池。
+
+### 两种模式通用
+
+- 将 `egress-ext.txt` 的 16 行写入中心容器 `/var/lib/opencode2api/egress-ext.txt`；文件内不得出现任何 `#` 字符。
+- 中心侧连通性验证：
+
+  ```bash
+  curl -sS -m 10 --socks5-hostname 'warpuser:WarpPass2026@NODE_PUBLIC_IP:1081' \
+    https://opencode.ai/cdn-cgi/trace
+  ```
+
+  期望 `ip=2a09:*`、`loc=JP`（或目标国家）。
+- 防火墙放行中心源 IP：`13.229.234.225`、`18.212.22.159`、`3.79.179.114`。
+- `proxyfile` 只在配置加载/管理端 Reload 时读取（无文件监视）；固定端口设计下换血无需重载。
 
 ## 运维
 
