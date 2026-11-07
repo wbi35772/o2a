@@ -1,0 +1,194 @@
+diff --git a/cloudflare/api.go b/cloudflare/api.go
+index 7eaf958..c2c6bce 100644
+--- a/cloudflare/api.go
++++ b/cloudflare/api.go
+@@ -4,10 +4,13 @@ import (
+ 	"context"
+ 	"crypto/rand"
+ 	"crypto/tls"
++	"encoding/binary"
+ 	"io"
+ 	"mime"
+ 	"net"
+ 	"net/http"
++	"net/url"
++	"os"
+ 	"strconv"
+ 	"strings"
+ 	"time"
+@@ -83,7 +86,7 @@ func (t cloudflareResponseTransport) RoundTrip(request *http.Request) (*http.Res
+ }
+ 
+ func dialWarpTLS(ctx context.Context, network, address string) (net.Conn, error) {
+-	rawConn, err := warpDialer.DialContext(ctx, network, address)
++	rawConn, err := dialWarpRaw(ctx, network, address)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -104,6 +107,166 @@ func dialWarpTLS(ctx context.Context, network, address string) (net.Conn, error)
+ 	return tlsConn, nil
+ }
+ 
++// dialWarpRaw dials the Cloudflare API directly. When HTTPS_PROXY points at a
++// SOCKS5 endpoint (for example a wireproxy instance in the same container), the
++// TCP connection is tunnelled through that proxy while the uTLS handshake still
++// runs end-to-end against api.cloudflareclient.com. This is what lets wgcf
++// create a fresh account from a different WARP egress /64 without losing the
++// Android TLS fingerprint.
++func dialWarpRaw(ctx context.Context, network, address string) (net.Conn, error) {
++	proxyAddr := os.Getenv("HTTPS_PROXY")
++	if proxyAddr == "" {
++		proxyAddr = os.Getenv("https_proxy")
++	}
++	if proxyAddr == "" {
++		return warpDialer.DialContext(ctx, network, address)
++	}
++
++	proxyURL, err := url.Parse(proxyAddr)
++	if err != nil {
++		return nil, errors.Wrap(err, "parse HTTPS_PROXY")
++	}
++	if proxyURL.Scheme != "socks5" && proxyURL.Scheme != "socks5h" {
++		return nil, errors.Errorf("HTTPS_PROXY scheme %q is unsupported; use socks5h://", proxyURL.Scheme)
++	}
++
++	conn, err := warpDialer.DialContext(ctx, "tcp", proxyURL.Host)
++	if err != nil {
++		return nil, errors.Wrap(err, "dial SOCKS5 proxy")
++	}
++
++	deadline := time.Now().Add(30 * time.Second)
++	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
++		deadline = ctxDeadline
++	}
++	if err := conn.SetDeadline(deadline); err != nil {
++		conn.Close()
++		return nil, errors.Wrap(err, "set SOCKS5 deadline")
++	}
++	if err := socks5Handshake(conn, proxyURL, address); err != nil {
++		conn.Close()
++		return nil, err
++	}
++	if err := conn.SetDeadline(time.Time{}); err != nil {
++		conn.Close()
++		return nil, errors.Wrap(err, "clear SOCKS5 deadline")
++	}
++	return conn, nil
++}
++
++func socks5Handshake(conn net.Conn, proxyURL *url.URL, target string) error {
++	username := ""
++	password := ""
++	if proxyURL.User != nil {
++		username = proxyURL.User.Username()
++		password, _ = proxyURL.User.Password()
++	}
++
++	methods := []byte{0x00}
++	if username != "" || password != "" {
++		methods = []byte{0x00, 0x02}
++	}
++	greeting := append([]byte{0x05, byte(len(methods))}, methods...)
++	if _, err := conn.Write(greeting); err != nil {
++		return errors.Wrap(err, "write SOCKS5 greeting")
++	}
++
++	methodReply := make([]byte, 2)
++	if _, err := io.ReadFull(conn, methodReply); err != nil {
++		return errors.Wrap(err, "read SOCKS5 method")
++	}
++	if methodReply[0] != 0x05 {
++		return errors.Errorf("SOCKS5 proxy replied with version %d", methodReply[0])
++	}
++	switch methodReply[1] {
++	case 0x00:
++	case 0x02:
++		if username == "" && password == "" {
++			return errors.New("SOCKS5 proxy requires authentication but HTTPS_PROXY has no credentials")
++		}
++		auth := []byte{0x01, byte(len(username))}
++		auth = append(auth, username...)
++		auth = append(auth, byte(len(password)))
++		auth = append(auth, password...)
++		if _, err := conn.Write(auth); err != nil {
++			return errors.Wrap(err, "write SOCKS5 credentials")
++		}
++		authReply := make([]byte, 2)
++		if _, err := io.ReadFull(conn, authReply); err != nil {
++			return errors.Wrap(err, "read SOCKS5 auth reply")
++		}
++		if authReply[1] != 0x00 {
++			return errors.New("SOCKS5 proxy rejected the configured credentials")
++		}
++	case 0xff:
++		return errors.New("SOCKS5 proxy rejected every offered authentication method")
++	default:
++		return errors.Errorf("SOCKS5 proxy selected unsupported method %d", methodReply[1])
++	}
++
++	host, portText, err := net.SplitHostPort(target)
++	if err != nil {
++		return errors.Wrap(err, "split SOCKS5 target")
++	}
++	port, err := strconv.Atoi(portText)
++	if err != nil || port < 1 || port > 65535 {
++		return errors.Errorf("invalid SOCKS5 target port %q", portText)
++	}
++
++	request := []byte{0x05, 0x01, 0x00}
++	if ip := net.ParseIP(host); ip != nil {
++		if ip4 := ip.To4(); ip4 != nil {
++			request = append(request, 0x01)
++			request = append(request, ip4...)
++		} else {
++			request = append(request, 0x04)
++			request = append(request, ip.To16()...)
++		}
++	} else {
++		if len(host) > 255 {
++			return errors.New("SOCKS5 target hostname is too long")
++		}
++		request = append(request, 0x03, byte(len(host)))
++		request = append(request, host...)
++	}
++	portBytes := make([]byte, 2)
++	binary.BigEndian.PutUint16(portBytes, uint16(port))
++	request = append(request, portBytes...)
++	if _, err := conn.Write(request); err != nil {
++		return errors.Wrap(err, "write SOCKS5 connect request")
++	}
++
++	replyHead := make([]byte, 4)
++	if _, err := io.ReadFull(conn, replyHead); err != nil {
++		return errors.Wrap(err, "read SOCKS5 connect reply")
++	}
++	if replyHead[0] != 0x05 {
++		return errors.Errorf("SOCKS5 proxy replied with version %d", replyHead[0])
++	}
++	if replyHead[1] != 0x00 {
++		return errors.Errorf("SOCKS5 connect failed with reply code %d", replyHead[1])
++	}
++	skip := 0
++	switch replyHead[3] {
++	case 0x01:
++		skip = 4
++	case 0x04:
++		skip = 16
++	case 0x03:
++		length := make([]byte, 1)
++		if _, err := io.ReadFull(conn, length); err != nil {
++			return errors.Wrap(err, "read SOCKS5 bound hostname length")
++		}
++		skip = int(length[0])
++	default:
++		return errors.Errorf("SOCKS5 proxy replied with unknown address type %d", replyHead[3])
++	}
++	if _, err := io.ReadFull(conn, make([]byte, skip+2)); err != nil {
++		return errors.Wrap(err, "read SOCKS5 bound address")
++	}
++	return nil
++}
++
+ func handshakeWarpTLS(ctx context.Context, rawConn net.Conn, serverName string, config *tls.Config) (*utls.UConn, error) {
+ 	if config.ServerName != "" {
+ 		serverName = config.ServerName
