@@ -1,16 +1,16 @@
 # WARP 双池融合：交付与对接报告（Session A → Session B）
 
-> 分支：`warp-fusion`（基于 `warp-stability@397ca30`，融合提交后合并 `main@beb1731` 的 producer）
+> 分支：`warp-fusion`（基于 `warp-stability@397ca30`，已合并 `instacloud-warp@809071d` 的完整 producer）
 > 日期：2026-11-07
-> 状态：代码已提交；`gofmt` 干净；`CGO_ENABLED=0 go build ./...` 通过；`go test ./...` 全绿；沙箱双池实测通过；生产未部署
+> 状态：代码已提交；`gofmt` 干净；`CGO_ENABLED=0 go build ./...` 通过；`go test ./...` 全绿；沙箱已接入真实 16 端口 producer 并完成 4 项验收；生产未部署
 > 设计稿：`docs/warp-pool-fusion-plan.zh.md`
-> 对端工程：`instacloud-warp/`（`main@beb1731`，Session B）
+> 对端工程：`instacloud-warp/`（`instacloud-warp@809071d`，Session B，15 文件逐字节对齐）
 
 ---
 
 ## 0. 一句话结论
 
-网关侧的双池融合已经收口：WARP 池与外部静态 SOCKS5 池不再互斥，按可用容量轮询，首个池拿不到 2xx 时在同一请求内跨池 Fallback；静态节点遇到 429 进入 15 分钟硬冷却，额度类 429 不采纳上游长达十几小时的 `Retry-After`；跨池切换前必定 drain + close 首个响应。Session B 只需按本文第 5、6 节的契约产出 `egress-ext.txt`，网关即可消费。当前真正的阻断不在网关，而在 producer 工程缺 3 个文件（第 7 节）以及 egress 文件的跨机同步尚未自动化（第 9 节）。
+网关侧的双池融合已经收口：WARP 池与外部静态 SOCKS5 池不再互斥，按可用容量轮询，首个池拿不到 2xx 时在同一请求内跨池 Fallback；静态节点遇到 429 进入 15 分钟硬冷却，额度类 429 不采纳上游长达十几小时的 `Retry-After`；跨池切换前必定 drain + close 首个响应。Session B 的完整 producer（15 文件，`instacloud-warp@809071d`）已合入并通过镜像构建，沙箱已用真实 16 个带认证 SOCKS5 出口完成 4 项验收（第 10 节）。生产部署只剩三件事：三台网关源 IP 到 producer 端口的连通性、固定 `egress-ext.txt` 落盘、按第 9 节灰度。
 
 ---
 
@@ -20,8 +20,8 @@
 | --- | --- |
 | 网关基线 | `warp-stability@397ca30`（2026-11-06T06:46:10Z，远端 tip） |
 | 融合提交 | `feat(gateway): fuse WARP and static proxy pools with cross-pool fallback` |
-| 对端基线 | `main@beb1731`（2026-11-07T12:27:24Z，producer entrypoint） |
-| 合并方式 | `Merge branch 'main' into warp-fusion`，只新增 `instacloud-warp/`，与网关代码无冲突 |
+| 对端基线 | `instacloud-warp@809071d`（15 文件完整 producer；旧 `main@beb1731` 只有 4 文件快照） |
+| 合并方式 | 先并 `main@beb1731`，再并 `instacloud-warp@809071d`；冲突仅 `endpoints.txt`/`entrypoint.sh`，均取 B 版本；`endpoints.txt` blob `0a562d8d…` 与 B 逐字节一致 |
 | 分支 | `warp-fusion`（不覆盖 `warp-stability`） |
 | 构建 | `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o opencode2api ./cmd/opencode2api` |
 
@@ -181,7 +181,7 @@ socks5://warpuser:WarpPass2026@JP_NODE_IP:1096
 
 ---
 
-## 5. Producer 对接矩阵（`instacloud-warp/`，`main@beb1731`）
+## 5. Producer 对接矩阵（`instacloud-warp/`，`instacloud-warp@809071d`）
 
 | Producer 侧 | 值/行为 | 网关侧消费 |
 | --- | --- | --- |
@@ -253,68 +253,83 @@ curl -sS -X POST 'http://127.0.0.1:8080/api/config/reload' \
 
 ---
 
-## 7. Session B 交付缺口（当前阻断 producer 构建）
+## 7. Session B 交付已补齐（`instacloud-warp@809071d`）
 
-`main@beb1731` 的 `instacloud-warp/` 只有 4 个文件：
+`instacloud-warp` 分支现有 15 个文件，合并时与对端逐字节一致；本分支随后仅给 `COUPLING-REPORT.md` 加了 8 行旧契约校正，producer 源码未改（`git diff origin/instacloud-warp -- instacloud-warp` 只剩该文档）：
 
 ```text
+instacloud-warp/.dockerignore
+instacloud-warp/.env.example
+instacloud-warp/.gitignore
+instacloud-warp/COUPLING-REPORT.md
 instacloud-warp/Dockerfile
+instacloud-warp/INTEGRATION-REPORT.md
+instacloud-warp/Makefile
+instacloud-warp/README.md
 instacloud-warp/docker-compose.yml
 instacloud-warp/endpoints.txt
 instacloud-warp/entrypoint.sh
+instacloud-warp/healthcheck.sh
+instacloud-warp/patches/wgcf-socks5-proxy.patch
+instacloud-warp/scripts/export-egress.sh
+instacloud-warp/scripts/firewall-allow-center.sh
 ```
 
-但 `Dockerfile` 还引用：
-
-| 缺失文件 | 引用位置 | 后果 |
-| --- | --- | --- |
-| `instacloud-warp/patches/wgcf-socks5-proxy.patch` | `COPY patches/wgcf-socks5-proxy.patch` | 镜像构建在 COPY 处失败 |
-| `instacloud-warp/healthcheck.sh` | `COPY healthcheck.sh`、`HEALTHCHECK CMD` | 镜像构建在 COPY 处失败 |
-| `scripts/firewall-allow-center.sh` | `docker-compose.yml` 注释 | 防火墙放行流程无脚本可执行 |
-
-构建验证命令（未执行，需在 producer 节点或本地 Docker 环境）：
+镜像构建与 16 端口自检已实测：
 
 ```bash
 cd instacloud-warp
 docker build -t warp-pool-producer:1.0.0 .
-# 预期当前失败：COPY failed: file not found ... patches/wgcf-socks5-proxy.patch
+# 60.6 MB；patched wgcf v2.3.1 + windtf/wireproxy@35cce290
+
+docker exec warp-pool-producer sh -c 'wc -l /data/egress-ext.txt'
+# 16
+
+for p in $(seq 1081 1096); do
+  curl -sS -x socks5h://warpuser:WarpPass2026@127.0.0.1:$p \
+    https://opencode.ai/cdn-cgi/trace | sed -n 's/^ip=//p'
+done | sort -u | wc -l
+# 16
 ```
 
-耦合前必须补齐这 3 个文件，或在 compose 中改为外部挂载。网关侧不依赖它们，但 producer 起不来就没有 `egress-ext.txt`。
+`COUPLING-REPORT.md` 写作基线是旧 `main@58f5667`，其中 `warp.enabled=false`、`free_tier_block_seconds: 900` 属旧契约；以本文第 3 节的 `warp.enabled=true` + `static_proxy_rate_limit_cooldown_seconds: 900` 为准。B 产出的容器与 16 端口行为已满足 A1/A2 契约。
 
 ---
 
-## 8. egress 文件跨机同步（尚未自动化）
+## 8. egress 文件：固定 16 行，无需周期同步
 
-producer 与三台网关不在同一容器/主机。`egress-ext.txt` 在 producer 的 `/data` 命名卷里，当前没有 HTTP 拉取接口。推荐两条路径：
+producer 采用「固定端口 1081–1096 + 端口背后的 WARP 隧道每 900s 分批（4×4）换血」：换血时在原端口上换 Endpoint 或重注册，绝不摘除端口。因此 `egress-ext.txt` 的 16 行是恒定静态文本：
 
-### 8.1 编排脚本拉取（推荐，最小改动）
-
-```bash
-# 1) producer 节点：从容器取出文件并 base64（insta CLI 无 upload，argv 传 base64）
-docker exec warp-pool-producer base64 -w0 /data/egress-ext.txt > egress.b64
-
-# 2) 网关容器：写入目标文件
-B64="$(cat egress.b64)"
-insta compute exec --timeout 30 GATEWAY_SERVICE -- \
-  sh -c "printf %s '$B64' | base64 -d > /var/lib/opencode2api/egress-ext.txt && wc -l /var/lib/opencode2api/egress-ext.txt"
-
-# 3) reload
-insta compute exec --timeout 30 GATEWAY_SERVICE -- \
-  sh -c "curl -sS -X POST http://127.0.0.1:8080/api/config/reload -H 'Authorization: Bearer TOKEN'"
+```text
+socks5://warpuser:WarpPass2026@NODE_HOST:1081
+socks5://warpuser:WarpPass2026@NODE_HOST:1082
+...
+socks5://warpuser:WarpPass2026@NODE_HOST:1096
 ```
 
-注意：`insta compute exec` 的 stdin 不可用，文件只能走 base64 argv；Windows 端需 `$env:NODE_OPTIONS='--no-network-family-autoselection'`。
+网关只在首次接入时写入一次并 reload；之后换血对网关完全透明，不需要 5 分钟同步任务。硬性要求：恰好 16 行、禁止 `#` 与注释、纯 `socks5://user:pass@NODE_HOST:1081..1096`；`NODE_HOST` 必须是三台网关都能到达的地址（公网 IPv4 或域名）。
 
-### 8.2 Producer 暴露只读 HTTP（后续增强）
+### 8.1 无公网入站时的沙箱接法（本次实测）
 
-producer 增加一个最小 HTTP 端点（例如 `:18080/egress-ext.txt`，仅允许中心 IP），网关侧用 sidecar/定时任务拉取。当前未实现，列为 Session B 可选增强。
+沙箱节点（Instabox）不开放 raw TCP 入站（`instabox_expose_port` 返回 `raw TCP ports are not enabled`），因此用一条 SSH 连接把 16 个端口搬到网关容器内：
 
-### 8.3 同步频率
+```bash
+# 网关容器内（Alpine）
+apk add --no-cache openssh-client
+ssh -N -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:22000:127.0.0.1:1081 \
+  -L 127.0.0.1:22001:127.0.0.1:1082 \
+  ... \
+  -L 127.0.0.1:22015:127.0.0.1:1096 \
+  USER@ssh.instabox.sh
+```
 
-- producer 每 900s reroll 一批（4 个），健康检查每 300s 可能触发 reroll。
-- 网关的硬冷却也是 900s，因此建议**每 5 分钟同步一次**，最迟不超过 15 分钟；否则网关会继续使用已被 producer 换掉的旧端口（旧端口仍监听时无害，但新 `/64` 无法及时进入池）。
-- 同步后必须 reload；reload 会重建静态池并保留 WARP 池。
+`egress-ext.txt` 相应写成 `socks5://warpuser:WarpPass2026@127.0.0.1:22000..22015`。认证、URL 解析、冷却、Fallback 全部走同一套代码路径；生产直连时只把 `127.0.0.1:220xx` 换回 `NODE_HOST:108x`。
+
+### 8.2 生产直连
+
+防火墙按 `instacloud-warp/scripts/firewall-allow-center.sh` 只放行 SIN/IAD/FRA 三台源 IP 到 1081–1096；`EXTERNAL_HOST` 必须显式设为节点公网地址，不要依赖自动探测。`egress-ext.txt` 写一次即可，不需要同步任务。
 
 ---
 
@@ -346,20 +361,21 @@ producer 增加一个最小 HTTP 端点（例如 `:18080/egress-ext.txt`，仅�
 | --- | --- | --- |
 | 1 | 沙箱 `opencode2api-2` 写入真实 `egress-ext.txt`，reload | `proxies.total=16`、`healthy=16`（或文件实际行数） |
 | 2 | 发一条免费模型请求 | HTTP 200；日志 `anonymous_attempt_succeeded` |
-| 3 | 连续请求直到额度 429 | `free_usage_limit_reached`；该节点 900s 内不再被选中 |
-| 4 | 16 节点全部额度 429 后再请求 | `fused_pool_fallback` static→warp；WARP 返回 200 |
-| 5 | 检查 `healthz` | `breaker_open=0`；`warp.active > warp.cooling` |
-| 6 | 等 900s 后再次请求 | 静态节点重新入池（`limitedUntil` 到期） |
+| 3 | 连续请求直到额度 429 | `free_usage_limit_reached`；该节点 `limitedUntil` 900s 内不再被选中 |
+| 4 | 16 节点全部额度 429 后再请求 | `fused_pool_fallback` static→warp；同请求 WARP 返回 200 |
+| 5 | 检查 `healthz` | `breaker_open=0`；全冷却期间 WARP 继续 200（`warp.active-cooling` 为 0 不代表不可用） |
+| 6 | 等 900s 后再次请求 | 首批冷却出口以新时间戳再次 `free_usage_limit_reached`，证明自动回池 |
 | 7 | 灰度一台生产 | 同上；确认三台生产源 IP 能连到 producer 端口 |
 | 8 | 三台全量 | 三台各自 `fused_pool_fallback` 与 WARP 计数正常 |
 
-沙箱已完成的实测（2026-11-07，`opencode2api-2:8082`）：
+沙箱实测（2026-11-07，`opencode2api-2:8082`，真实 producer 16 端口经 SSH 隧道）：
 
-- 40/40 HTTP 200；
-- 2 次 `fused_pool_fallback` static→warp（`attempts=8`，`error=free tier blocked the egress IP`）；
-- 16 次 `free_usage_limit_reached`（`Retry-After` 50029–51214s）；
-- 随后 38 次请求 WARP `attempt=1` 成功（`2a09:bac5:c82a:2828::/64`）；
-- `breaker_open=0`；`healthz`：`quota_hits=16`、warp 4 active / 3 cooling。
+- 接入：Instabox `test` 上运行 `warp-pool-producer:1.2.0`（`network_mode: host`，1081–1096，`EXTERNAL_HOST=35.91.188.19`）；网关侧 `ssh -N -L 22000..22015:127.0.0.1:1081..1096` 接入，`egress-real.txt` 16 行 `socks5://warpuser:WarpPass2026@127.0.0.1:22000..22015`，`healthz` 16/16 healthy。
+- ① 分发：240 个请求全部 HTTP 200；静态成功 74（22000×12、22004×16、22006×19、22012×23、22015×4），WARP 成功 166（`c829:2446`×16、`c82a:32aa`×43、`c82a:a0`×27、`c82e:2446`×36、`c82e:2832`×44）。静态可用数 ≥ 2×WARP 可用数时恒为 static first，随出口冷却自然切到 WARP；交替分支因容量从未接近而未触发（规则见 `fusion.go`）。
+- ② 额度 429：63 次 `free_usage_limit_reached`，16 个出口全部命中；上游 `Retry-After` 38273–51214s 被忽略，按契约钉死 900s；13 次 `fused_pool_fallback` static→warp，`attempts=1/3`、`error=null`（额度冷却不置 `blocked`，不误触熔断）。样本 `req_004da1b`：22009/22010/22011 连续三次 429 → 同请求 fallback → 13:34:00.47 WARP 200（总 3.8s）。
+- ③ 全部冷却：13:24:26.86 最后一个出口 429 之后 `static_success=0`、`warp_success=140`；`healthz` `quota_hits=60`、`breaker_open=0`；WARP 承接 100% 流量。
+- ④ 900s 恢复：13:18:33 首批冷却的 22009/22010/22011 在 13:33:56.69/57.28/57.86 重新入池并被再次选中，各自返回新 429（`Retry-After` 38273/39837/37874）后重新冷却；`quota_hits` 60→63。
+- 汇总：`static_succ=74`、`warp_succ=166`、`quota_total=63`、`fallback_total=13`、`breaker=0`；首个 429 `13:18:33.062Z`，首个成功 `13:18:35.679Z`。
 
 ---
 
@@ -367,10 +383,10 @@ producer 增加一个最小 HTTP 端点（例如 `:18080/egress-ext.txt`，仅�
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| 真实带认证 SOCKS5 | 未验证 | 沙箱用明文 socks5，未连过 `warpuser:WarpPass2026` 的真实 producer |
-| Producer 构建 | 当前失败 | 缺 `patches/wgcf-socks5-proxy.patch`、`healthcheck.sh`、防火墙脚本 |
-| egress 文件同步 | 未自动化 | 需编排脚本或 producer HTTP 端点 |
-| JP 节点放行三台生产源 IP | 未验证 | 需在 producer 防火墙放行 SIN/IAD/FRA 出口 |
+| 真实带认证 SOCKS5 | 已验证 | 16 端口 `warpuser:WarpPass2026`（`127.0.0.1:22000-22015`），请求全部 200；每端口独立 `/64` |
+| Producer 构建 | 已通过 | `warp-pool-producer:1.0.0` 60.6 MB；patched wgcf v2.3.1 + wireproxy；16/16 唯一 `/64` |
+| egress 文件同步 | 不需要 | 固定 16 行，首次写入；换血在 1081–1096 端口背后完成 |
+| 生产直连放行 | 未执行 | 需在三台生产执行 `firewall-allow-center.sh`；沙箱走 SSH 隧道，不代表直连连通性 |
 | 生产二进制 commit | 未固定 | 生产镜像 sha 已记录，但 app commit 未注入；替换前需比对 |
 | 15m 冷却 vs 900s reroll | 已对齐 | 但 reroll 是分批（4/批），实际换池有错峰；网关按节点独立计时 |
 | WARP 容量 2x 规则 | 保留 | WARP 池容量 ≥ 静态池 2 倍时优先 WARP；如希望静态池更多参与，调 `warp.pool_size` 或改 `fusedOrder` |
@@ -405,6 +421,6 @@ producer 增加一个最小 HTTP 端点（例如 `:18080/egress-ext.txt`，仅�
 | Session A（网关） | 双池调度、跨池 fallback、静态 429 冷却、WARP/静态熔断隔离、配置 reload、healthz/日志 |
 | Session B（producer） | WARP 注册、wireproxy SOCKS5、端口 1081–1096、`egress-ext.txt`、去重/重注册、健康检查、防火墙 |
 | 共享契约 | 文件行格式、认证、纯 IPv6、`/48` 不重叠、无 `#pool`、只写健康节点、900s reroll 与 900s 冷却对齐 |
-| 待补 | producer 3 个缺失文件；egress 文件同步；中心 IP 放行；真实认证 SOCKS5 联调 |
+| 待补 | 三台生产源 IP 放行与直连连通；生产二进制 commit 固定；生产灰度 |
 
 耦合时只要守住第 4 节的 6 条硬性约束，网关侧无需再改代码；若 producer 改为动态端口或 `#pool` 语义，必须先改网关的 `AvailableExits`/`MarkFailure`，否则硬冷却与统计会失真。
