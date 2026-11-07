@@ -312,14 +312,22 @@ func warpProxy(label string) *proxyTransport {
 // doWarpAnonymousUpstream is the anonymous lane with WARP as its only egress.
 // It walks the same two upstream gates (v2 /inference first, v1 /zen second)
 // as doAnonymousUpstream, but draws a WARP lease per attempt instead of a
-// proxy. The lane breaker still applies; per-proxy cooldowns and the block
+// proxy. The WARP lane breaker applies; per-proxy cooldowns and the block
 // cursor do not, because a block is a property of the WARP exit and rotation
 // replaces it.
 func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
-	if !g.anonymous.AllowAttempt() {
+	return g.warpAnonymousWalk(ctx, route, bodies, ids, attemptOffset, true)
+}
+
+// warpAnonymousWalk runs the WARP lane. allowDirect controls the host-egress
+// fallback at its end: the standalone WARP lane enables it, while the fused
+// scheduler passes false because it walks the static proxy pool as the second
+// egress lane and keeps the host address as the last resort of that pool.
+func (g *Gateway) warpAnonymousWalk(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int, allowDirect bool) (*http.Response, error, int) {
+	if !g.warpLane.AllowAttempt() {
 		return nil, errAnonymousLanePaused, 0
 	}
-	defer g.anonymous.ReleaseProbe()
+	defer g.warpLane.ReleaseProbe()
 	rawBody := bodies[config.TierZen]
 	if len(rawBody) == 0 {
 		return nil, errors.New("no prepared Zen request body"), 0
@@ -393,7 +401,7 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 			status := upstreamStatus(resp)
 			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, warpProxy(egress), resp, err, duration)
 			if err == nil && status/100 == 2 {
-				g.anonymous.NoteSuccess()
+				g.warpLane.NoteSuccess()
 				g.logger.Debug("anonymous WARP upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", egress, "status", status, "duration_ms", duration.Milliseconds())
 				return resp, nil, attempts
 			}
@@ -446,8 +454,8 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 			break
 		}
 		if !leaseBlocked && upstreamStatus(lastResponse) != http.StatusTooManyRequests {
-			if pause, tripped := g.anonymous.NoteFailure(); tripped {
-				g.logger.Warn("anonymous lane circuit breaker opened", "component", "upstream", "event", "anonymous_breaker_open", "status", upstreamStatus(lastResponse), "paused_for", pause.String())
+			if pause, tripped := g.warpLane.NoteFailure(); tripped {
+				g.logger.Warn("anonymous WARP lane circuit breaker opened", "component", "upstream", "event", "anonymous_breaker_open", "status", upstreamStatus(lastResponse), "paused_for", pause.String())
 				break
 			}
 		}
@@ -462,7 +470,7 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 	// silent leak onto the host address. The pass reuses the prepared bodies
 	// and the session the WARP attempts already rotated, so it costs at most
 	// two requests.
-	if g.cfg.Warp.DirectFallback && g.directTransport != nil && ctx.Err() == nil &&
+	if allowDirect && g.cfg.Warp.DirectFallback && g.directTransport != nil && ctx.Err() == nil &&
 		(blocked || errors.Is(lastErr, errWARPUnavailable)) {
 		if lastResponse != nil {
 			httpx.DrainAndClose(lastResponse.Body)
@@ -507,7 +515,7 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 				status := upstreamStatus(resp)
 				g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, warpProxy("direct"), resp, err, duration)
 				if err == nil && status/100 == 2 {
-					g.anonymous.NoteSuccess()
+					g.warpLane.NoteSuccess()
 					g.logger.Debug("anonymous direct fallback accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", "direct", "status", status, "duration_ms", duration.Milliseconds())
 					return resp, nil, attempts
 				}

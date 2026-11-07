@@ -283,6 +283,12 @@ type PerformanceConfig struct {
 	// abusive stays out of the anonymous cursor. Upstream does not publish
 	// the block duration, so the default is a conservative 15 minutes.
 	FreeTierBlockSeconds int `json:"free_tier_block_seconds"`
+	// StaticProxyRateLimitCooldownSeconds is the hard hold applied to a static
+	// anonymous exit after HTTP 429. A spent free allowance waits for the
+	// external producer to re-roll the exit and takes the full window; a
+	// transient rate limit may shorten it through its Retry-After. Zero uses
+	// the built-in 15 minutes, aligned with a 20-minute /64 rotation.
+	StaticProxyRateLimitCooldownSeconds int `json:"static_proxy_rate_limit_cooldown_seconds"`
 }
 
 // AttemptTimeout returns the bound for a single upstream attempt. When
@@ -419,6 +425,9 @@ func Normalize(path string, cfg Config) (Config, error) {
 	}
 	if cfg.Performance.FreeTierBlockSeconds < 0 {
 		return Config{}, errors.New("performance.free_tier_block_seconds must not be negative (0 uses the built-in cool-down)")
+	}
+	if cfg.Performance.StaticProxyRateLimitCooldownSeconds < 0 {
+		return Config{}, errors.New("performance.static_proxy_rate_limit_cooldown_seconds must not be negative (0 uses the built-in 15 minutes)")
 	}
 	if cfg.Logging.Level != "debug" && cfg.Logging.Level != "info" && cfg.Logging.Level != "warn" && cfg.Logging.Level != "error" {
 		return Config{}, errors.New("logging.level must be debug, info, warn, or error")

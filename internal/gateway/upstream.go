@@ -343,18 +343,31 @@ func (g *Gateway) maxAnonymousExits() int {
 	return defaultMaxAnonymousExits
 }
 
-// doAnonymousUpstream walks the session's anonymous proxy cursor. Each static
-// proxy is tried at most once, up to performance.max_anonymous_exits proxies;
-// rotating #pool proxies may be drawn again until Retry.MaxAttempts proxies
-// were used. For each proxy it tries the upstreams in anonymousUpstreams
-// order: the configured v2 /inference upstream (Upstream.Anonymous) only, since
-// the v1 lane fallback is retired and commented out there. Any failure,
-// including an HTTP error response, advances to the next upstream or proxy; a
-// proxy-route failure, or a proxy marked unhealthy, skips that proxy's
-// remaining upstreams. Only a successful response ends the anonymous phase;
-// exhausting the proxy cursor returns control to the preferred authenticated
-// tiers. It returns the last response (body still open), else the last error,
-// plus the number of attempts made.
+// doAnonymousUpstream routes a free-tier request to its egress lane. A gateway
+// with both the WARP pool and a configured static proxy pool fuses them (see
+// fusedActive); otherwise WARP or the configured proxies serve alone.
+func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
+	if g.fusedActive(route) {
+		return g.doFusedAnonymousUpstream(ctx, route, bodies, ids, attemptOffset)
+	}
+	if g.usesWARP(route.ID, config.TierZen, true) {
+		return g.doWarpAnonymousUpstream(ctx, route, bodies, ids, attemptOffset)
+	}
+	return g.doStaticAnonymousUpstream(ctx, route, bodies, ids, attemptOffset)
+}
+
+// doStaticAnonymousUpstream walks the session's anonymous proxy cursor. Each
+// static proxy is tried at most once, up to performance.max_anonymous_exits
+// proxies; rotating #pool proxies may be drawn again until Retry.MaxAttempts
+// proxies were used. For each proxy it tries the upstreams in
+// anonymousUpstreams order: the configured v2 /inference upstream
+// (Upstream.Anonymous) only, since the v1 lane fallback is retired and
+// commented out there. Any failure, including an HTTP error response, advances
+// to the next upstream or proxy; a proxy-route failure, or a proxy marked
+// unhealthy, skips that proxy's remaining upstreams. Only a successful
+// response ends the anonymous phase; exhausting the proxy cursor returns
+// control to the preferred authenticated tiers. It returns the last response
+// (body still open), else the last error, plus the number of attempts made.
 //
 // A 429 is interpreted the way the WARP lane interprets it: the free tier
 // meters the conversation's session id as well as the egress IP, so the first
@@ -363,10 +376,7 @@ func (g *Gateway) maxAnonymousExits() int {
 // retirement: the exit can still serve other conversations) and rotates
 // again. Without this, one spent conversation kept answering 429 on every
 // fresh exit and burned the pool for the whole request budget.
-func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
-	if g.usesWARP(route.ID, config.TierZen, true) {
-		return g.doWarpAnonymousUpstream(ctx, route, bodies, ids, attemptOffset)
-	}
+func (g *Gateway) doStaticAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
 	// The breaker holds the lane shut for an hour-scale window after repeated
 	// failures: poking a flagged upstream again would only extend the block.
 	if !g.anonymous.AllowAttempt() {
@@ -504,6 +514,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 					// egresses remain.
 					node.proxy.closeIdle()
 					node.proxy.noteQuotaHit()
+					// A static exit (no #pool) cannot draw a fresh egress, so
+					// hold it out of rotation for the full rate-limit window.
+					// The call is a no-op for #pool nodes.
+					g.anonymous.MarkFailure(node, resp, nil)
 					lastErr = errFreeTierIPBlocked
 					blocked = true
 					deferred = true

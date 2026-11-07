@@ -104,20 +104,16 @@ func (t *proxyTransport) noteAbuseHit() {
 // cooldown per proxy. Unlike key nodes, anonymous nodes are never rebound:
 // changing proxy is the failover mechanism because Zen rate-limits them by IP.
 type anonymousNodes struct {
-	nodes    []*anonymousNode
-	next     atomic.Uint64
-	cooldown time.Duration
-	hasPool  bool
-	// breaker stops the whole lane after repeated failures or when every
-	// exit is under the free tier's IP block: the lane then pauses for
-	// backoff.base, doubling every further trip (one strike per trip) up to
-	// backoff.max. A success closes the breaker. probing marks the single
-	// half-open attempt allowed after the window expires.
-	backoff        anonymousBackoff
-	breakerUntil   atomic.Int64
-	breakerStrikes atomic.Int32
-	consecutive    atomic.Int32
-	probing        atomic.Bool
+	nodes             []*anonymousNode
+	next              atomic.Uint64
+	cooldown          time.Duration
+	rateLimitCooldown time.Duration
+	hasPool           bool
+	// breaker stops this lane after repeated failures or when every exit is
+	// under the free tier's IP block. The WARP lane owns a separate
+	// laneBreaker (Gateway.warpLane), so an outage of one pool never pauses
+	// the other one.
+	breaker laneBreaker
 }
 
 type anonymousBackoff struct {
@@ -126,10 +122,36 @@ type anonymousBackoff struct {
 	max       time.Duration
 }
 
+// laneBreaker is the circuit breaker of one anonymous egress pool: the static
+// proxy list and the WARP pool each own one. It pauses its lane for
+// backoff.base after enough failures or a forced trip, doubling every further
+// trip (one strike per trip) up to backoff.max. A success closes it. probing
+// marks the single half-open attempt allowed after the window expires.
+type laneBreaker struct {
+	backoff        anonymousBackoff
+	breakerUntil   atomic.Int64
+	breakerStrikes atomic.Int32
+	consecutive    atomic.Int32
+	probing        atomic.Bool
+}
+
+// newLaneBreaker returns a breaker for one lane. A zero backoff disables it.
+func newLaneBreaker(backoff anonymousBackoff) laneBreaker {
+	return laneBreaker{backoff: backoff}
+}
+
+// defaultStaticRateLimitCooldown is how long a static anonymous exit stays out
+// of rotation after HTTP 429 when
+// performance.static_proxy_rate_limit_cooldown_seconds is unset. It is aligned
+// with an external WARP producer that re-rolls each exit's /64 about every 20
+// minutes.
+const defaultStaticRateLimitCooldown = 15 * time.Minute
+
 type anonymousNode struct {
 	proxy         *proxyTransport
 	failures      atomic.Uint32
-	cooldownUntil atomic.Int64
+	cooldownUntil atomic.Int64 // soft: transport failures, still a last resort
+	limitedUntil  atomic.Int64 // hard: HTTP 429, never drawn until it expires
 }
 
 // anonymousCursor walks the anonymous nodes for one request from start;
@@ -144,8 +166,8 @@ type anonymousCursor struct {
 
 // anonymousPool builds one anonymous node per proxy transport, or an empty
 // pool when the anonymous tier is disabled.
-func anonymousPool(enabled bool, transports *proxyTransports, cooldown time.Duration, backoff anonymousBackoff) *anonymousNodes {
-	pool := &anonymousNodes{cooldown: cooldown, backoff: backoff}
+func anonymousPool(enabled bool, transports *proxyTransports, cooldown, rateLimitCooldown time.Duration, backoff anonymousBackoff) *anonymousNodes {
+	pool := &anonymousNodes{cooldown: cooldown, rateLimitCooldown: rateLimitCooldown, breaker: newLaneBreaker(backoff)}
 	if !enabled || transports == nil {
 		return pool
 	}
@@ -209,48 +231,39 @@ func (p *anonymousNodes) CursorFor(affinity string) anonymousCursor {
 // half-open probe, so the lane is not flooded before it is known to work
 // again; every winner must release the probe through NoteSuccess, NoteFailure,
 // NoteNeutral or ReleaseProbe.
-func (p *anonymousNodes) AllowAttempt() bool {
-	if p == nil || p.backoff.threshold < 1 {
+func (b *laneBreaker) AllowAttempt() bool {
+	if b.backoff.threshold < 1 {
 		return true
 	}
-	until := p.breakerUntil.Load()
+	until := b.breakerUntil.Load()
 	if until == 0 {
 		return true
 	}
 	if time.Now().UnixNano() < until {
 		return false
 	}
-	return p.probing.CompareAndSwap(false, true)
+	return b.probing.CompareAndSwap(false, true)
 }
 
 // Open reports whether the breaker currently holds the lane shut. A half-open
 // breaker whose window has expired reports false: the lane is being probed.
-func (p *anonymousNodes) Open() bool {
-	if p == nil {
-		return false
-	}
-	until := p.breakerUntil.Load()
+func (b *laneBreaker) Open() bool {
+	until := b.breakerUntil.Load()
 	return until != 0 && time.Now().UnixNano() < until
 }
 
 // ReleaseProbe returns an unused half-open probe slot. It is safe to call
 // after any outcome has already closed or reopened the breaker.
-func (p *anonymousNodes) ReleaseProbe() {
-	if p == nil {
-		return
-	}
-	p.probing.Store(false)
+func (b *laneBreaker) ReleaseProbe() {
+	b.probing.Store(false)
 }
 
 // NoteSuccess closes the breaker and forgets the strikes.
-func (p *anonymousNodes) NoteSuccess() {
-	if p == nil {
-		return
-	}
-	p.consecutive.Store(0)
-	p.breakerStrikes.Store(0)
-	p.breakerUntil.Store(0)
-	p.probing.Store(false)
+func (b *laneBreaker) NoteSuccess() {
+	b.consecutive.Store(0)
+	b.breakerStrikes.Store(0)
+	b.breakerUntil.Store(0)
+	b.probing.Store(false)
 }
 
 // NoteNeutral releases a half-open probe and closes the breaker without
@@ -258,55 +271,101 @@ func (p *anonymousNodes) NoteSuccess() {
 // rejected the request itself (for example a context-length 400): the lane is
 // reachable, so it should not stay paused, and the request is not evidence of
 // an upstream outage.
-func (p *anonymousNodes) NoteNeutral() {
-	if p == nil {
-		return
-	}
-	p.consecutive.Store(0)
-	p.breakerUntil.Store(0)
-	p.probing.Store(false)
+func (b *laneBreaker) NoteNeutral() {
+	b.consecutive.Store(0)
+	b.breakerUntil.Store(0)
+	b.probing.Store(false)
 }
 
 // NoteFailure records one failed attempt. It reports the pause window when the
 // consecutive-failure threshold trips the breaker. A failure during the
 // half-open probe reopens the breaker immediately with the next, longer window
 // instead of waiting for another threshold's worth of traffic.
-func (p *anonymousNodes) NoteFailure() (time.Duration, bool) {
-	if p == nil || p.backoff.threshold < 1 {
+func (b *laneBreaker) NoteFailure() (time.Duration, bool) {
+	if b.backoff.threshold < 1 {
 		return 0, false
 	}
 	now := time.Now().UnixNano()
-	until := p.breakerUntil.Load()
-	if p.probing.Load() || (until != 0 && now >= until) {
-		return p.trip()
+	until := b.breakerUntil.Load()
+	if b.probing.Load() || (until != 0 && now >= until) {
+		return b.trip()
 	}
-	if p.consecutive.Add(1) < p.backoff.threshold {
+	if b.consecutive.Add(1) < b.backoff.threshold {
 		return 0, false
 	}
-	return p.trip()
+	return b.trip()
 }
 
 // ForceOpen trips the breaker immediately. The anonymous walk calls it when
 // every exit is under the free tier's IP block: another request cannot reach a
 // working exit, and probing would only extend the penalty.
-func (p *anonymousNodes) ForceOpen() (time.Duration, bool) {
-	if p == nil || p.backoff.threshold < 1 {
+func (b *laneBreaker) ForceOpen() (time.Duration, bool) {
+	if b.backoff.threshold < 1 {
 		return 0, false
 	}
-	return p.trip()
+	return b.trip()
 }
 
 // trip opens the breaker for the next backoff window and returns it.
-func (p *anonymousNodes) trip() (time.Duration, bool) {
-	p.consecutive.Store(0)
-	strike := p.breakerStrikes.Add(1)
-	pause := p.backoff.base << min(strike-1, 30)
-	if pause > p.backoff.max || pause <= 0 {
-		pause = p.backoff.max
+func (b *laneBreaker) trip() (time.Duration, bool) {
+	b.consecutive.Store(0)
+	strike := b.breakerStrikes.Add(1)
+	pause := b.backoff.base << min(strike-1, 30)
+	if pause > b.backoff.max || pause <= 0 {
+		pause = b.backoff.max
 	}
-	p.breakerUntil.Store(time.Now().Add(pause).UnixNano())
-	p.probing.Store(false)
+	b.breakerUntil.Store(time.Now().Add(pause).UnixNano())
+	b.probing.Store(false)
 	return pause, true
+}
+
+// The anonymousNodes delegates keep the static lane's existing call sites
+// unchanged while the state itself moved into laneBreaker.
+
+func (p *anonymousNodes) AllowAttempt() bool {
+	if p == nil {
+		return true
+	}
+	return p.breaker.AllowAttempt()
+}
+
+func (p *anonymousNodes) Open() bool {
+	if p == nil {
+		return false
+	}
+	return p.breaker.Open()
+}
+
+func (p *anonymousNodes) ReleaseProbe() {
+	if p != nil {
+		p.breaker.ReleaseProbe()
+	}
+}
+
+func (p *anonymousNodes) NoteSuccess() {
+	if p != nil {
+		p.breaker.NoteSuccess()
+	}
+}
+
+func (p *anonymousNodes) NoteNeutral() {
+	if p != nil {
+		p.breaker.NoteNeutral()
+	}
+}
+
+func (p *anonymousNodes) NoteFailure() (time.Duration, bool) {
+	if p == nil {
+		return 0, false
+	}
+	return p.breaker.NoteFailure()
+}
+
+func (p *anonymousNodes) ForceOpen() (time.Duration, bool) {
+	if p == nil {
+		return 0, false
+	}
+	return p.breaker.ForceOpen()
 }
 
 // Next returns the next node to try. Its first pass visits every node once
@@ -330,6 +389,9 @@ func (c *anonymousCursor) Next() *anonymousNode {
 	isBlocked := func(node *anonymousNode) bool {
 		return node.proxy != nil && node.proxy.blockedUntil.Load() > now
 	}
+	isLimited := func(node *anonymousNode) bool {
+		return node.limitedUntil.Load() > now
+	}
 	for c.offset < n {
 		idx := (c.start + c.offset) % n
 		c.offset++
@@ -338,6 +400,13 @@ func (c *anonymousCursor) Next() *anonymousNode {
 			// The free tier flagged this egress IP: the answer would be the
 			// same on every lane, so neither a fresh leg nor the cooldown
 			// fallback below may return it.
+			c.used[idx] = true
+			continue
+		}
+		if isLimited(node) {
+			// A rate-limit hold is hard: the exit's address was metered by
+			// the upstream, and drawing it again would only repeat the 429.
+			// The fallback passes below may not return it either.
 			c.used[idx] = true
 			continue
 		}
@@ -351,7 +420,7 @@ func (c *anonymousCursor) Next() *anonymousNode {
 			idx := (c.start + c.offset) % n
 			c.offset++
 			node := c.pool.nodes[idx]
-			if node.proxy.pool && !isBlocked(node) {
+			if node.proxy.pool && !isBlocked(node) && !isLimited(node) {
 				return node
 			}
 		}
@@ -365,7 +434,7 @@ func (c *anonymousCursor) Next() *anonymousNode {
 			continue
 		}
 		node := c.pool.nodes[idx]
-		if isBlocked(node) {
+		if isBlocked(node) || isLimited(node) {
 			continue
 		}
 		healthy := node.proxy.healthy.Load()
@@ -387,6 +456,7 @@ func (p *anonymousNodes) MarkSuccess(node *anonymousNode) {
 	}
 	node.failures.Store(0)
 	node.cooldownUntil.Store(0)
+	node.limitedUntil.Store(0)
 }
 
 // RestoreProxy clears cooldowns for anonymous nodes bound to a recovered
@@ -403,11 +473,12 @@ func (p *anonymousNodes) RestoreProxy(proxy *proxyTransport) int {
 		if node.proxy != proxy {
 			continue
 		}
-		if node.cooldownUntil.Load() == 0 && node.failures.Load() == 0 {
+		if node.cooldownUntil.Load() == 0 && node.limitedUntil.Load() == 0 && node.failures.Load() == 0 {
 			continue
 		}
 		node.failures.Store(0)
 		node.cooldownUntil.Store(0)
+		node.limitedUntil.Store(0)
 		cleared++
 	}
 	return cleared
@@ -425,14 +496,46 @@ const maxAnonymousRetryAfterMultiplier = 8
 
 // MarkFailure cools node down after an error or a 401, 403, 429 or 5xx
 // response; any other response leaves it untouched, and #pool nodes are never
-// cooled. The cooldown doubles with each consecutive failure, from the
-// base cooldown up to 8x, and a longer Retry-After extends it up to that same
-// 8x ceiling.
+// cooled. A non-429 failure takes the exponential soft cooldown, from the base
+// cooldown up to 8x, and a longer Retry-After extends it up to that same 8x
+// ceiling. A 429 is charged to the exit address rather than to the lane, so it
+// takes a hard hold in limitedUntil instead: the full rate-limit window for a
+// spent free allowance, and a window no longer than the hard limit for a
+// transient rate limit that advertises a shorter Retry-After.
 func (p *anonymousNodes) MarkFailure(node *anonymousNode, resp *http.Response, err error) {
 	if node == nil || (node.proxy != nil && node.proxy.pool) {
 		return
 	}
-	if err == nil && resp != nil && resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	if err == nil && resp != nil && status != http.StatusUnauthorized && status != http.StatusForbidden && status != http.StatusTooManyRequests && status < 500 {
+		return
+	}
+	now := time.Now()
+	if status == http.StatusTooManyRequests {
+		hold := p.rateLimitCooldown
+		if isFreeUsageLimitBody(peekResponseBody(resp)) {
+			// The free allowance is metered to the egress address and the
+			// upstream Retry-After is scoped to that address, commonly hours
+			// into the next day. Neither a shorter header nor the exponential
+			// lane cooldown applies: the exit becomes useful only after the
+			// external producer re-rolls its /64, which the configured window
+			// approximates. A 429 is not a lane failure, so failures and the
+			// breaker stay untouched.
+			node.limitedUntil.Store(now.Add(hold).UnixNano())
+			node.failures.Store(0)
+			return
+		}
+		// A transient 429 may advertise when the address is welcome again.
+		// Adopt that only while it is shorter than the hard window; a longer
+		// or missing header keeps the configured hold.
+		if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > 0 && retryAfter < hold {
+			hold = retryAfter
+		}
+		node.limitedUntil.Store(now.Add(hold).UnixNano())
+		node.failures.Store(0)
 		return
 	}
 	failures := node.failures.Add(1)
@@ -442,7 +545,49 @@ func (p *anonymousNodes) MarkFailure(node *anonymousNode, resp *http.Response, e
 			delay = min(retryAfter, p.cooldown*maxAnonymousRetryAfterMultiplier)
 		}
 	}
-	node.cooldownUntil.Store(time.Now().Add(delay).UnixNano())
+	node.cooldownUntil.Store(now.Add(delay).UnixNano())
+}
+
+// HasExternal reports whether the anonymous pool holds any real proxy exit
+// beyond the host address. It separates a configured proxyfile pool (fusion
+// candidate) from the implicit ["direct"] route.
+func (p *anonymousNodes) HasExternal() bool {
+	if p == nil {
+		return false
+	}
+	for _, node := range p.nodes {
+		if node.proxy != nil && node.proxy.name != "direct" {
+			return true
+		}
+	}
+	return false
+}
+
+// AvailableExits counts the static anonymous exits that can serve a request
+// now: not under the free tier's IP block, healthy, and neither in a soft
+// cooldown nor in a hard rate-limit hold. Rotating #pool transports are always
+// counted because a new connection draws a fresh egress; the host address is
+// excluded because it is a separate fallback lane.
+func (p *anonymousNodes) AvailableExits(now time.Time) int {
+	if p == nil {
+		return 0
+	}
+	stamp := now.UnixNano()
+	available := 0
+	for _, node := range p.nodes {
+		proxy := node.proxy
+		if proxy == nil || proxy.name == "direct" {
+			continue
+		}
+		if proxy.blocked(now) || !proxy.healthy.Load() {
+			continue
+		}
+		if !proxy.pool && (node.cooldownUntil.Load() > stamp || node.limitedUntil.Load() > stamp) {
+			continue
+		}
+		available++
+	}
+	return available
 }
 
 func (p *proxyTransports) hasHealthy() bool {

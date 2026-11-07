@@ -78,6 +78,10 @@ type Gateway struct {
 	zenNodes   *upstreamNodes
 	goNodes    *upstreamNodes
 	anonymous  *anonymousNodes
+	// warpLane is the circuit breaker of the WARP pool. It is separate from
+	// the one anonymousNodes owns, so an outage of the static proxy pool never
+	// pauses the WARP pool and vice versa.
+	warpLane laneBreaker
 	// warp, when non-nil, is the shared userspace WARP pool. Free-model
 	// traffic on the anonymous lane and the Zen key tier leaves through it
 	// instead of the configured proxies and transports.
@@ -122,6 +126,10 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, war
 		return nil, err
 	}
 	cooldown := time.Duration(cfg.Performance.FailureCooldownSeconds) * time.Second
+	rateLimitCooldown := time.Duration(cfg.Performance.StaticProxyRateLimitCooldownSeconds) * time.Second
+	if rateLimitCooldown <= 0 {
+		rateLimitCooldown = defaultStaticRateLimitCooldown
+	}
 	zenNodes, err := nodePool(cfg.ZenKeys, transports, cooldown)
 	if err != nil {
 		return nil, fmt.Errorf("zen node pool: %w", err)
@@ -140,7 +148,8 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, war
 		transports:      transports,
 		zenNodes:        zenNodes,
 		goNodes:         goNodes,
-		anonymous:       anonymousPool(cfg.Anonymous, transports, cooldown, anonymousBackoffFromConfig(cfg.Models.AnonymousBackoff)),
+		anonymous:       anonymousPool(cfg.Anonymous, transports, cooldown, rateLimitCooldown, anonymousBackoffFromConfig(cfg.Models.AnonymousBackoff)),
+		warpLane:        newLaneBreaker(anonymousBackoffFromConfig(cfg.Models.AnonymousBackoff)),
 		warp:            warpPool,
 		directTransport: directTransports.items[0],
 		sessions:        newSessionGuard(),
