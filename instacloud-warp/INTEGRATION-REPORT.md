@@ -1,8 +1,10 @@
 # instacloud-warp 接入报告
 
 > 会话 B 交付物 · 供主反代 opencode2api（会话 A）对接讨论
-> 仓库：`https://github.com/wbi35772/opencode2api/tree/main/instacloud-warp`
+> 仓库：`https://github.com/wbi35772/opencode2api/tree/instacloud-warp/instacloud-warp`
 > 状态：沙箱节点全链路实测通过（构建 / 链式注册 / 去重 / 满池换血 / 故障恢复 / 导出验收）
+>
+> **更正（v2）**：本报告 4.2/4.3 与第 7 节的 `warp.enabled = true` 表述有误——网关开启 WARP 后免费模型流量会绕过 `proxyfile` 静态池。正确耦合配置与源码级分析见 [COUPLING-REPORT.md](COUPLING-REPORT.md)。
 
 ---
 

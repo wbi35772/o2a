@@ -11,7 +11,7 @@
 | 出口 | 纯 IPv6（`AllowedIPs = ::/0`），禁止 IPv4 出口 |
 | 去重 | 同容器内 16 个端口的 `/64` 前缀互不相同 |
 | 存量 `/48` 禁区 | SIN `2a09:bac5:55*` / `2a09:bac1:65*`；IAD `2a09:bac5:c82*`；FRA `2a09:bac1:27b*` / `2a09:bac1:1e*` |
-| 换血周期 | `900` 秒（15 分钟，对齐网关 `limitedUntil`） |
+| 换血周期 | `900` 秒（15 分钟，对齐网关免费层 IP 屏蔽 `free_tier_block_seconds=900`） |
 | 边界 | 不修改 opencode2api 任何代码 |
 
 ## 目录结构
@@ -92,7 +92,7 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 | `START_PORT` | `1081` | 首个 SOCKS5 端口 |
 | `POOL_SIZE` / `INSTANCE_COUNT` | `16` | 实例数（两变量等价，任一设置即可） |
 | `SOCKS_USER` / `SOCKS_PASS` | `warpuser` / `WarpPass2026` | SOCKS5 账密 |
-| `REROLL_INTERVAL` | `900` | 全量换血周期（秒），对齐网关 15 分钟 `limitedUntil` |
+| `REROLL_INTERVAL` | `900` | 全量换血周期（秒），对齐网关免费层屏蔽窗口（`free_tier_block_seconds=900`） |
 | `REROLL_BATCH` | `4` | 换血每批实例数 |
 | `DEDUP_RETRIES` | `4` | 单个端口去重最大重试 |
 | `REGISTER_RETRIES` | `3` | 单个账号注册最大尝试 |
@@ -131,7 +131,7 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 - 探活：`curl -x socks5h://... https://opencode.ai/cdn-cgi/trace`，取 `ip=` 前 4 段作为 `/64`。
 - 前缀为空、前缀非 `2a09:`、命中禁区 `/48`、或与其他端口重复 → 更换 Endpoint 并重启该实例，最多 4 次。
 - 4 次换 Endpoint 仍失败且前缀为空/非法（账号级故障）→ 删除账号重新注册一次再复探（`recover_account`）；仅因 `/64` 重复则不再重注册，留给下一轮换血。
-- 每 `900` 秒全量换血（每批 4 个，批间 5 秒），与网关 15 分钟硬冷却对齐。
+- 每 `900` 秒全量换血（每批 4 个，批间 5 秒），与网关 15 分钟免费层屏蔽窗口对齐。
 - 每 `300` 秒健康检查：探活失败或 `/64` 与其他端口重复先换 Endpoint；仍失败则完整 bring-up（必要时重新注册）。
 
 ### B4 接入清单
@@ -171,9 +171,9 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 
 ## 跨会话契约 v1.1（硬性）
 
-- 清单每行严格为 `socks5://USER:PASS@IP:PORT`，**绝不能**带 `#pool` 或任何 `#` 注释/标签后缀。网关源码对带 `#pool` 的节点在 `MarkFailure` 时直接 `return`，会跳过 `limitedUntil` 的 15 分钟硬冷却。
+- 清单每行严格为 `socks5://USER:PASS@IP:PORT`，**绝不能**带任何 `#` 字符。网关会把含 `#pool` 的条目识别为动态池：不参与失败冷却（`MarkFailure` 直接返回）、每次尝试新建连接、并在池内循环抽取；只有纯静态条目才会进入失败冷却（15s 起、逐次翻倍、上限 8 倍）与免费层屏蔽（默认 900s）。
 - `export-egress.sh` 写出后强制校验：文件出现 `#`、或有效 `socks5://` 行数不等于 `POOL_SIZE`，立即报错、删除输出并以非零退出。
-- 默认 `POOL_SIZE=16`（端口 `1081~1096`，是 `max_anonymous_exits=8` 的两倍冗余），`REROLL_INTERVAL=900` 秒，与网关 15 分钟 `limitedUntil` 对齐。
+- 默认 `POOL_SIZE=16`（端口 `1081~1096`，是 `max_anonymous_exits=8` 的两倍冗余），`REROLL_INTERVAL=900` 秒，与网关免费层屏蔽窗口（默认 900s）对齐。
 
 ## 交给会话 A
 
@@ -186,7 +186,8 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
    ```
 
 3. 确认防火墙已放行 `13.229.234.225`、`18.212.22.159`、`3.79.179.114`。
-4. 网关侧：`warp.enabled` 保持 `true`，`proxyfile` 指向该文件，`retry.max_attempts = 6`，静态代理 429 冷却 15 分钟。
+4. 网关侧：`warp.enabled` 必须为 `false`——设为 `true` 时免费模型流量全部改走网关内置 WARP，`proxyfile` 静态池会被完全绕过。`proxyfile` 指向该文件；`performance.max_anonymous_exits = 8`（16 端口 = 2× 冗余）；`performance.free_tier_block_seconds = 900`。
+5. `proxyfile` 只在配置加载/管理端 Reload 时读取（网关没有文件监视）。本清单 URL 恒定（出口在端口后漂移），换血无需重载；仅当节点公网 IP 或端口变化时，在 WebUI 保存配置或调用管理端 Reload。
 
 ## 运维
 
