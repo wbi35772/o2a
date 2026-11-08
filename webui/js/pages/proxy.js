@@ -587,7 +587,7 @@ async function probePool() {
     });
     const meta = result.meta || {};
     const summary = result.pool || {};
-    const regions = (result.regions || []).map((item) => `${item.loc}:${item.count}`).join(" / ") || "—";
+    const regions = (meta.regions || result.regions || []).map((item) => `${item.loc}:${item.count}`).join(" / ") || "—";
     if (!$("#pool-name").value.trim() && meta.pool?.id) $("#pool-name").value = meta.pool.id;
     if (result.suggested?.scope) $("#pool-scope").value = result.suggested.scope;
     status.textContent =

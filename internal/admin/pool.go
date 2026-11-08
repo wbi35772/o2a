@@ -648,7 +648,7 @@ func (a *Server) handlePoolProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
-		"pool":   status.Status,
+		"pool":   live.Pool,
 		"meta":   json.RawMessage(meta),
 		"status": status.Status,
 		"suggested": map[string]any{
