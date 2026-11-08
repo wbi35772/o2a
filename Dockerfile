@@ -24,7 +24,7 @@ FROM alpine:3.22
 ARG TARGETARCH=amd64
 ARG MIHOMO_VERSION=v1.19.33
 
-RUN apk add --no-cache ca-certificates su-exec tzdata jq yq-go \
+RUN apk add --no-cache ca-certificates su-exec tzdata jq yq-go curl \
     && case "${TARGETARCH}" in \
          arm64) mihomo_arch=arm64 ;; \
          *)     mihomo_arch=amd64-compatible ;; \
