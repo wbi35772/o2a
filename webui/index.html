@@ -1078,17 +1078,21 @@
                     <div class="field full">
                       <label for="pool-api">API 地址</label>
                       <input id="pool-api" placeholder="http://warp-pool.insta.internal:1081" />
+                      <p class="field-hint">同平台网关填池控制台「连接与鉴权」里的私网地址；外部平台填公网地址。</p>
                     </div>
                     <div class="field full">
                       <label for="pool-token">API Token（留空保持不变）</label>
                       <input id="pool-token" type="password" autocomplete="new-password" placeholder="Bearer token" />
+                      <p class="field-hint">在池控制台登录后从「连接与鉴权」复制；网关不会回显已保存的 token。</p>
                     </div>
                   </div>
                   <label class="check">
                     <input id="pool-enabled" type="checkbox" checked />
                     <span>启用（同步时拉取这个池的端点）</span>
                   </label>
+                  <p id="pool-probe-status" class="section-caption" role="status"></p>
                   <div class="actions">
+                    <button id="pool-probe" type="button" class="btn btn-sm">测试连接 / 从池导入</button>
                     <button id="pool-save" type="button" class="btn btn-sm btn-primary">保存池</button>
                     <button id="pool-cancel" type="button" class="btn btn-sm">取消</button>
                   </div>
@@ -1104,6 +1108,7 @@
                     </div>
                   </div>
                   <div id="pool-facts" class="facts"></div>
+                  <p id="pool-region-note" class="section-caption"></p>
                   <div class="form-grid">
                     <div class="field">
                       <label for="pool-rotation">轮换间隔（秒）</label>
@@ -1124,6 +1129,16 @@
                   </div>
                   <div class="actions">
                     <button id="pool-tune-save" type="button" class="btn btn-sm btn-primary">保存参数</button>
+                  </div>
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="pool-scale-count">节点数量（在线扩缩容）</label>
+                      <input id="pool-scale-count" type="number" min="1" max="64" />
+                      <p class="field-hint">扩容会重启池的 mux，API 与 SOCKS 会中断几秒；已注册账号保留，新节点自动注册。</p>
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button id="pool-scale-apply" type="button" class="btn btn-sm">应用节点数量</button>
                   </div>
                   <div class="table-wrap">
                     <table class="table">

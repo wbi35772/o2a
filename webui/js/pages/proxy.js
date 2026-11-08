@@ -471,6 +471,15 @@ function renderPoolDetail() {
   const view = state.poolStatus[pool.id];
   const data = view?.status;
   const summary = data?.pool;
+  const nodes = data?.nodes || [];
+  const regions = {};
+  for (const node of nodes) {
+    const loc = node.loc || "?";
+    regions[loc] = (regions[loc] || 0) + 1;
+  }
+  const regionText = Object.entries(regions).map(([loc, n]) => `${loc}:${n}`).join(" / ") || "—";
+  const ports = nodes.map((node) => Number(node.port)).filter(Number.isFinite);
+  const portText = ports.length ? `${Math.min(...ports)}-${Math.max(...ports)}` : "—";
   const host = $("#pool-facts");
   host.replaceChildren();
   if (!view) {
@@ -481,6 +490,8 @@ function renderPoolDetail() {
     host.append(
       fact("节点规模（健康 / 总数）", `${summary.healthy ?? 0} / ${summary.count ?? 0}`),
       fact("启用节点", summary.enabled ?? "—"),
+      fact("地区", regionText),
+      fact("节点端口", portText),
       fact("轮换间隔", `${summary.rotation_interval_seconds ?? "—"} 秒`),
       fact("每轮轮换", summary.reroll_batch ?? "—"),
       fact("健康检查", `${summary.health_interval_seconds ?? "—"} 秒`),
@@ -489,13 +500,23 @@ function renderPoolDetail() {
       fact("内网地址", summary.private_host || "—"),
       fact("公网地址", summary.public_host || "—"),
       fact("SOCKS 用户", summary.socks_user || "—"),
+      fact("API 地址", pool.api_url || "—"),
+      fact("API Token", pool.token_set ? "已保存（不回显）" : "未设置"),
     );
     $("#pool-rotation").value = summary.rotation_interval_seconds ?? "";
     $("#pool-batch").value = summary.reroll_batch ?? "";
     $("#pool-health").value = summary.health_interval_seconds ?? "";
     $("#pool-min-healthy").value = summary.min_healthy ?? "";
+    const scaleInput = $("#pool-scale-count");
+    if (scaleInput && document.activeElement !== scaleInput) scaleInput.value = summary.count ?? "";
   }
-  renderPoolNodes(data?.nodes || [], view);
+  const note = $("#pool-region-note");
+  if (note) {
+    note.textContent = summary
+      ? `当前地区 ${regionText}。WARP 出口地区由池容器所在区域决定；要换地区，请在目标区域再部署一个池服务，然后回到这里「新增池」填入它的 API 地址和 token。`
+      : "";
+  }
+  renderPoolNodes(nodes, view);
 }
 
 function renderPoolNodes(nodes, view) {
@@ -547,6 +568,38 @@ async function poolNodeAction(user, action, button) {
   }
 }
 
+async function probePool() {
+  const apiURL = $("#pool-api").value.trim();
+  const token = $("#pool-token").value.trim();
+  const status = $("#pool-probe-status");
+  if (!apiURL) {
+    toast("先填池的 API 地址", true);
+    return;
+  }
+  status.textContent = "正在连接池…";
+  try {
+    const body = { api_url: apiURL };
+    if (token) body.token = token;
+    else if (state.poolEditing) body.id = state.poolEditing;
+    const result = await api("/api/proxy/pools/probe", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    const meta = result.meta || {};
+    const summary = result.pool || {};
+    const regions = (result.regions || []).map((item) => `${item.loc}:${item.count}`).join(" / ") || "—";
+    if (!$("#pool-name").value.trim() && meta.pool?.id) $("#pool-name").value = meta.pool.id;
+    if (result.suggested?.scope) $("#pool-scope").value = result.suggested.scope;
+    status.textContent =
+      `连接成功：池 ${meta.pool?.id || summary.id || "?"} · ` +
+      `节点 ${summary.count ?? 0}（健康 ${summary.healthy ?? 0}）· 地区 ${regions} · ` +
+      `私网 ${meta.api?.private_url || "—"} · 公网 ${meta.api?.public_url || "—"}`;
+  } catch (error) {
+    status.textContent = `连接失败：${error.message}`;
+    toast(error.message, true);
+  }
+}
+
 async function savePoolTuning() {
   const payload = {
     rotation_interval_seconds: Number($("#pool-rotation").value),
@@ -578,6 +631,26 @@ async function rerollPool() {
     });
     toast("已提交全部轮换，稍后刷新状态", false);
     setTimeout(() => loadPoolStatus().catch(() => {}), 2000);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function scalePool() {
+  const count = Number($("#pool-scale-count").value);
+  if (!Number.isInteger(count) || count < 1 || count > 64) {
+    toast("节点数量需为 1-64 的整数", true);
+    return;
+  }
+  if (!window.confirm(`把池扩缩容到 ${count} 个节点？会重启池 mux，API 与 SOCKS 会短暂中断。`)) return;
+  try {
+    await api(`/api/proxy/pools/${encodeURIComponent(state.poolDetail)}/scale`, {
+      method: "POST",
+      body: JSON.stringify({ count }),
+    });
+    toast(`已提交扩容到 ${count} 个节点，等待池重启 mux`, false);
+    setTimeout(() => loadPoolStatus().catch(() => {}), 4000);
+    setTimeout(() => loadPoolStatus().catch(() => {}), 12000);
   } catch (error) {
     toast(error.message, true);
   }
@@ -1018,6 +1091,8 @@ function bind() {
     $("#pool-name").focus();
   });
   $("#pool-save").addEventListener("click", savePoolForm);
+  $("#pool-probe").addEventListener("click", probePool);
+  $("#pool-scale-apply").addEventListener("click", scalePool);
   $("#pool-cancel").addEventListener("click", resetPoolForm);
   $("#pool-refresh-status").addEventListener("click", () =>
     loadPoolStatus().catch((error) => toast(error.message, true)),

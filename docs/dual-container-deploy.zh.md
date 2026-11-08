@@ -94,6 +94,25 @@ EXTERNAL_HOST=<public-ip>
 | `O2A_WEB_SAME_PORT` | `1` | 传 `-web-same-port` |
 | `O2A_LISTEN` / `O2A_WEB_LISTEN` | 空 | 可选监听覆盖 |
 
+### 3.3 池控制台、接入与扩容
+
+池容器自带一个控制台，地址就是池服务的公网域名（`https://<pool-public-domain>/`）或同项目私网地址（`http://<POOL_PRIVATE_HOST>:<MUX_PORT>/`）。用池的 `API_TOKEN` / `POOL_API_TOKEN` 登录后：
+
+- **连接与鉴权**：显示 API 私网/公网地址、API Token、SOCKS 用户名和密码，均可一键复制。
+- **部署参数**：显示 `INSTANCE_COUNT`、`START_PORT`、`MUX_PORT`、端口范围、轮换/健康检查参数、endpoints 文件与候选数量、`DENY_48_PREFIXES` 等容器启动参数。
+- **扩容与区域**：输入目标节点数（1–64）点「应用」，池会启动/停止 wireproxy 节点、重启 mux 并重写端点文件。扩容会短暂中断 API/SOCKS（几秒），已注册的 WARP 账号保留；目标节点数写入 `/data/control/scale`，容器重启后仍生效。
+- **区域**：WARP 出口区域由池容器所在区域决定（例如 `eu-central` 通常落到 `DE`）。要增加区域，在目标区域再部署一个池服务（同一镜像/源，改 `POOL_ID`、`POOL_PUBLIC_HOST`、`POOL_PRIVATE_HOST`），然后在网关「静态池」里新增一条，多个池的端点会合并去重。
+
+网关侧「配置中心 → 代理 → 代理中心 → 静态池 → 新增池」填写：
+
+| 字段 | 填法 |
+| --- | --- |
+| API 地址 | 同平台/同项目填池的私网地址；跨平台填池控制台显示的公网地址 |
+| API Token | 池控制台的「连接与鉴权」里复制 |
+| 端点范围 | 同平台通常 `private`；跨平台或池只暴露公网时用 `public` |
+
+不确定时先点「测试连接 / 从池导入」：网关会带 token 请求池的 `/api/v1/status` 和 `/api/v1/meta`，成功后自动填入名称、地址、范围并显示池的节点数/健康数。
+
 ## 4. 网关配置（融合模式）
 
 ```json

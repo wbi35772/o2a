@@ -34,6 +34,7 @@ CONTROL_DIR="$STATE_DIR/control"
 QUEUE_DIR="$CONTROL_DIR/queue"
 DISABLED_FILE="$CONTROL_DIR/disabled"
 CONFIG_FILE="$CONTROL_DIR/config.json"
+SCALE_FILE="$CONTROL_DIR/scale"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
@@ -69,6 +70,67 @@ load_runtime_config() {
     LAST_ROTATION="$REROLL_INTERVAL"
     ROTATION_CHANGED=1
   fi
+}
+
+load_scale() {
+  [[ -f "$SCALE_FILE" ]] || return 0
+  local v
+  v=$(tr -dc '0-9' <"$SCALE_FILE" 2>/dev/null || true)
+  if [[ -n "$v" ]] && ((10#$v >= 1 && 10#$v <= 64)); then
+    INSTANCE_COUNT=$((10#$v))
+    POOL_SIZE="$INSTANCE_COUNT"
+    log "scale: persisted instance count ${INSTANCE_COUNT}"
+  fi
+}
+
+# scale_pool changes the live node count, then restarts the mux so its fan-out
+# list matches. Accounts and profiles on disk are kept, so scaling back up
+# reuses the existing WARP registrations.
+scale_pool() {
+  local target=$1 old=$INSTANCE_COUNT i port dir ep_count
+  [[ "$target" =~ ^[0-9]+$ ]] || { log "scale: invalid count '$target'"; return 1; }
+  target=$((10#$target))
+  ((target >= 1 && target <= 64)) || { log "scale: count must be 1-64"; return 1; }
+  ep_count=$(grep -cEv '^[[:space:]]*(#|$)' "$ENDPOINTS_FILE" 2>/dev/null || printf '0')
+  ((target <= ep_count)) || { log "scale: target $target exceeds endpoint pool ($ep_count)"; return 1; }
+  if [[ -n "$MUX_PORT" ]]; then
+    local last=$((START_PORT + target - 1))
+    if ((MUX_PORT >= START_PORT && MUX_PORT <= last)); then
+      log "scale: MUX_PORT $MUX_PORT conflicts with node ports $START_PORT-$last"
+      return 1
+    fi
+  fi
+  if ((target == old)); then
+    log "scale: already at $target instances"
+    return 0
+  fi
+  mkdir -p "$CONTROL_DIR"
+  printf '%s\n' "$target" >"$SCALE_FILE"
+  log "scale: $old -> $target instances"
+  if ((target > old)); then
+    for ((i = old + 1; i <= target; i++)); do
+      bring_up "$i" || log "WARN scale: $(inst_name "$i") failed to come up"
+    done
+  else
+    for ((i = target + 1; i <= old; i++)); do
+      port=$(port_for "$i")
+      dir=$(inst_dir "$i")
+      stop_wireproxy "$dir"
+      unset "STATUS[$port]" "EP_USED[$port]"
+      log "scale: node $(inst_name "$i") stopped (port $port)"
+    done
+    if [[ -n "$LAST_WORKING_PORT" ]] && ((LAST_WORKING_PORT > START_PORT + target - 1)); then
+      LAST_WORKING_PORT=""
+    fi
+  fi
+  INSTANCE_COUNT=$target
+  POOL_SIZE=$target
+  stop_mux
+  start_mux
+  dedup_pass
+  write_egress
+  flush_status
+  log "scale: done, ${INSTANCE_COUNT} instances on ports ${START_PORT}-$((START_PORT + INSTANCE_COUNT - 1))"
 }
 
 user_index() {
@@ -163,6 +225,10 @@ process_queue() {
           stop_node "$idx"
           write_egress
         fi
+        ;;
+      scale)
+        log "control: scale to $user"
+        scale_pool "$user" || log "control: scale to $user failed"
         ;;
       *)
         [[ -n "$cmd" ]] && log "control: unknown command '$cmd'"
@@ -641,6 +707,20 @@ print_egress_block() {
   printf '\n'
 }
 
+stop_mux() {
+  [[ -n "$MUX_PID" ]] || return 0
+  if kill -0 "$MUX_PID" 2>/dev/null; then
+    kill "$MUX_PID" 2>/dev/null || true
+    local n
+    for n in {1..30}; do
+      kill -0 "$MUX_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -9 "$MUX_PID" 2>/dev/null || true
+  fi
+  MUX_PID=""
+}
+
 start_mux() {
   [[ -n "$MUX_PORT" ]] || return 0
   local last_port=$((START_PORT + INSTANCE_COUNT - 1))
@@ -788,6 +868,7 @@ cleanup() {
 main() {
   mkdir -p "$STATE_DIR/instances" "$QUEUE_DIR"
   load_runtime_config
+  load_scale
   [[ -r "$ENDPOINTS_FILE" ]] || die "endpoint pool file not found: $ENDPOINTS_FILE"
   mapfile -t ENDPOINTS < <(grep -Ev '^[[:space:]]*(#|$)' "$ENDPOINTS_FILE")
   ((${#ENDPOINTS[@]} >= INSTANCE_COUNT)) ||

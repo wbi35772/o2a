@@ -77,24 +77,87 @@ type nodeView struct {
 }
 
 type poolView struct {
-	ID                     string `json:"id"`
-	PublicHost             string `json:"public_host,omitempty"`
-	PrivateHost            string `json:"private_host,omitempty"`
-	MuxPort                int    `json:"mux_port"`
-	SocksUser              string `json:"socks_user"`
-	Count                  int    `json:"count"`
-	Healthy                int    `json:"healthy"`
-	Enabled                int    `json:"enabled"`
+	ID                      string `json:"id"`
+	PublicHost              string `json:"public_host,omitempty"`
+	PrivateHost             string `json:"private_host,omitempty"`
+	MuxPort                 int    `json:"mux_port"`
+	SocksUser               string `json:"socks_user"`
+	Count                   int    `json:"count"`
+	Healthy                 int    `json:"healthy"`
+	Enabled                 int    `json:"enabled"`
 	RotationIntervalSeconds int    `json:"rotation_interval_seconds"`
-	RerollBatch            int    `json:"reroll_batch"`
-	HealthIntervalSeconds  int    `json:"health_interval_seconds"`
-	MinHealthy             int    `json:"min_healthy"`
-	UpdatedAt              string `json:"updated_at"`
+	RerollBatch             int    `json:"reroll_batch"`
+	HealthIntervalSeconds   int    `json:"health_interval_seconds"`
+	MinHealthy              int    `json:"min_healthy"`
+	UpdatedAt               string `json:"updated_at"`
 }
 
 type statusResponse struct {
 	Pool  poolView   `json:"pool"`
 	Nodes []nodeView `json:"nodes"`
+}
+
+type metaAPI struct {
+	PrivateURL string `json:"private_url"`
+	PublicURL  string `json:"public_url"`
+	Token      string `json:"token"`
+}
+
+type metaSocks struct {
+	User    string `json:"user"`
+	Pass    string `json:"pass"`
+	MuxPort int    `json:"mux_port"`
+}
+
+type metaDeploy struct {
+	StateDir         string `json:"state_dir"`
+	StartPort        int    `json:"start_port"`
+	InstanceCount    int    `json:"instance_count"`
+	InstanceCountEnv int    `json:"instance_count_env"`
+	MuxPort          int    `json:"mux_port"`
+	MuxListen        string `json:"mux_listen"`
+	RerollInterval   int    `json:"reroll_interval"`
+	RerollBatch      int    `json:"reroll_batch"`
+	HealthInterval   int    `json:"health_interval"`
+	MinHealthy       int    `json:"min_healthy"`
+	DedupRetries     int    `json:"dedup_retries"`
+	RegisterRetries  int    `json:"register_retries"`
+	ProbeURL         string `json:"probe_url"`
+	ProbeTimeout     int    `json:"probe_timeout"`
+	EndpointsFile    string `json:"endpoints_file"`
+	EndpointsCount   int    `json:"endpoints_count"`
+	Deny48Prefixes   string `json:"deny_48_prefixes"`
+	PoolPublicHost   string `json:"pool_public_host"`
+	PoolPrivateHost  string `json:"pool_private_host"`
+	ExternalHost     string `json:"external_host"`
+	Keepalive        int    `json:"keepalive"`
+	PortStart        int    `json:"port_start"`
+	PortEnd          int    `json:"port_end"`
+	ScaleMin         int    `json:"scale_min"`
+	ScaleMax         int    `json:"scale_max"`
+}
+
+type metaEndpoints struct {
+	File  string   `json:"file"`
+	Count int      `json:"count"`
+	Items []string `json:"items"`
+}
+
+type metaRegion struct {
+	Loc      string   `json:"loc"`
+	Count    int      `json:"count"`
+	Healthy  int      `json:"healthy"`
+	Prefixes []string `json:"prefixes"`
+}
+
+type metaResponse struct {
+	Pool      poolView      `json:"pool"`
+	API       metaAPI       `json:"api"`
+	Socks     metaSocks     `json:"socks"`
+	Deploy    metaDeploy    `json:"deploy"`
+	Endpoints metaEndpoints `json:"endpoints"`
+	Regions   []metaRegion  `json:"regions"`
+	Runtime   runtimeConfig `json:"runtime"`
 }
 
 type runtimeConfig struct {
@@ -212,6 +275,18 @@ func (a *apiServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.handleStatus(w, r)
+	case path == "/api/v1/meta":
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		a.handleMeta(w, r)
+	case path == "/api/v1/scale":
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		a.handleScale(w, r)
 	case path == "/api/v1/endpoints":
 		if r.Method != http.MethodGet {
 			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -252,6 +327,157 @@ func (a *apiServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 
 func (a *apiServer) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, a.status())
+}
+
+func envInt(key string, fallback int) int {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func envString(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+// handleMeta exposes the connection material and deployment knobs the pool
+// console needs: API origins, token, SOCKS credentials, env defaults, the
+// anycast endpoint file and the regions currently seen on the nodes.
+func (a *apiServer) handleMeta(w http.ResponseWriter, r *http.Request) {
+	st := a.status()
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	publicURL := scheme + "://" + r.Host
+	privateURL := ""
+	if a.privateHost != "" {
+		privateURL = "http://" + a.privateHost
+		if a.muxPort > 0 && a.muxPort != 80 {
+			privateURL += ":" + strconv.Itoa(a.muxPort)
+		}
+	}
+	endpointsFile := envString("ENDPOINTS_FILE", "/usr/local/share/warp-pool/endpoints.txt")
+	endpoints := make([]string, 0, 32)
+	if data, err := os.ReadFile(endpointsFile); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			endpoints = append(endpoints, line)
+			if len(endpoints) >= 256 {
+				break
+			}
+		}
+	}
+	regions := make([]metaRegion, 0)
+	regionIndex := map[string]int{}
+	for _, node := range st.Nodes {
+		loc := strings.TrimSpace(node.Loc)
+		if loc == "" {
+			loc = "unknown"
+		}
+		pos, ok := regionIndex[loc]
+		if !ok {
+			pos = len(regions)
+			regionIndex[loc] = pos
+			regions = append(regions, metaRegion{Loc: loc})
+		}
+		regions[pos].Count++
+		if node.Healthy {
+			regions[pos].Healthy++
+		}
+		prefix := strings.TrimSpace(node.Prefix64)
+		if prefix != "" && len(regions[pos].Prefixes) < 8 {
+			found := false
+			for _, existing := range regions[pos].Prefixes {
+				if existing == prefix {
+					found = true
+					break
+				}
+			}
+			if !found {
+				regions[pos].Prefixes = append(regions[pos].Prefixes, prefix)
+			}
+		}
+	}
+	sort.Slice(regions, func(i, j int) bool {
+		if regions[i].Count != regions[j].Count {
+			return regions[i].Count > regions[j].Count
+		}
+		return regions[i].Loc < regions[j].Loc
+	})
+	scaleMax := len(endpoints)
+	if scaleMax == 0 || scaleMax > 64 {
+		scaleMax = 64
+	}
+	deploy := metaDeploy{
+		StateDir:         envString("STATE_DIR", a.stateDir),
+		StartPort:        a.m.basePort,
+		InstanceCount:    a.m.count,
+		InstanceCountEnv: envInt("INSTANCE_COUNT", a.m.count),
+		MuxPort:          a.muxPort,
+		MuxListen:        envString("MUX_LISTEN", "0.0.0.0"),
+		RerollInterval:   envInt("REROLL_INTERVAL", a.rotation),
+		RerollBatch:      envInt("REROLL_BATCH", a.batch),
+		HealthInterval:   envInt("HEALTH_INTERVAL", a.health),
+		MinHealthy:       envInt("MIN_HEALTHY", a.minHealthy),
+		DedupRetries:     envInt("DEDUP_RETRIES", 4),
+		RegisterRetries:  envInt("REGISTER_RETRIES", 3),
+		ProbeURL:         envString("PROBE_URL", "https://opencode.ai/cdn-cgi/trace"),
+		ProbeTimeout:     envInt("PROBE_TIMEOUT", 6),
+		EndpointsFile:    endpointsFile,
+		EndpointsCount:   len(endpoints),
+		Deny48Prefixes:   envString("DENY_48_PREFIXES", ""),
+		PoolPublicHost:   envString("POOL_PUBLIC_HOST", a.publicHost),
+		PoolPrivateHost:  envString("POOL_PRIVATE_HOST", a.privateHost),
+		ExternalHost:     envString("EXTERNAL_HOST", ""),
+		Keepalive:        envInt("WGCF_KEEPALIVE", 25),
+		PortStart:        a.m.basePort,
+		PortEnd:          a.m.basePort + a.m.count - 1,
+		ScaleMin:         1,
+		ScaleMax:         scaleMax,
+	}
+	writeJSON(w, http.StatusOK, metaResponse{
+		Pool:      st.Pool,
+		API:       metaAPI{PrivateURL: privateURL, PublicURL: publicURL, Token: a.token},
+		Socks:     metaSocks{User: a.socksUser, Pass: a.m.clientPass, MuxPort: a.muxPort},
+		Deploy:    deploy,
+		Endpoints: metaEndpoints{File: endpointsFile, Count: len(endpoints), Items: endpoints},
+		Regions:   regions,
+		Runtime:   a.config(),
+	})
+}
+
+// handleScale queues a runtime node-count change. The entrypoint starts or
+// stops wireproxy instances and restarts the mux with the new fan-out count.
+func (a *apiServer) handleScale(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Count int `json:"count"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.Count < 1 || body.Count > 64 {
+		writeErr(w, http.StatusBadRequest, "count must be between 1 and 64")
+		return
+	}
+	if a.muxPort > 0 && a.m.basePort <= a.muxPort && a.muxPort <= a.m.basePort+body.Count-1 {
+		writeErr(w, http.StatusConflict, fmt.Sprintf("mux port %d conflicts with node ports %d-%d", a.muxPort, a.m.basePort, a.m.basePort+body.Count-1))
+		return
+	}
+	if err := a.queue(fmt.Sprintf("scale %d", body.Count)); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"queued": true, "count": body.Count})
 }
 
 func (a *apiServer) status() statusResponse {
@@ -307,19 +533,19 @@ func (a *apiServer) status() statusResponse {
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Index < nodes[j].Index })
 	return statusResponse{
 		Pool: poolView{
-			ID:                     a.poolID,
-			PublicHost:             a.publicHost,
-			PrivateHost:            a.privateHost,
-			MuxPort:                a.muxPort,
-			SocksUser:              a.socksUser,
-			Count:                  a.m.count,
-			Healthy:                healthy,
-			Enabled:                enabled,
+			ID:                      a.poolID,
+			PublicHost:              a.publicHost,
+			PrivateHost:             a.privateHost,
+			MuxPort:                 a.muxPort,
+			SocksUser:               a.socksUser,
+			Count:                   a.m.count,
+			Healthy:                 healthy,
+			Enabled:                 enabled,
 			RotationIntervalSeconds: cfg.RotationIntervalSeconds,
-			RerollBatch:            cfg.RerollBatch,
-			HealthIntervalSeconds:  cfg.HealthIntervalSeconds,
-			MinHealthy:             cfg.MinHealthy,
-			UpdatedAt:              time.Now().UTC().Format(time.RFC3339),
+			RerollBatch:             cfg.RerollBatch,
+			HealthIntervalSeconds:   cfg.HealthIntervalSeconds,
+			MinHealthy:              cfg.MinHealthy,
+			UpdatedAt:               time.Now().UTC().Format(time.RFC3339),
 		},
 		Nodes: nodes,
 	}

@@ -565,3 +565,157 @@ func (a *Server) handlePoolLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"lines": items})
 }
+
+// handlePoolProbe authenticates against an unsaved pool so the editor can
+// import its name, endpoint scope and live size with one click. It never
+// writes the submitted token to disk.
+func (a *Server) handlePoolProbe(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID     string `json:"id"`
+		APIURL string `json:"api_url"`
+		Token  string `json:"token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_body", "请求体无效")
+		return
+	}
+	base := strings.TrimRight(strings.TrimSpace(body.APIURL), "/")
+	if base == "" || len(base) > 2048 ||
+		(!strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://")) {
+		writeAdminError(w, http.StatusBadRequest, "invalid_url", "API 地址需为 http(s) URL")
+		return
+	}
+	token := strings.TrimSpace(body.Token)
+	if token == "" && strings.TrimSpace(body.ID) != "" {
+		if stored, ok := a.findPool(strings.TrimSpace(body.ID)); ok {
+			token = stored.Token
+		}
+	}
+	pool := StaticPool{APIURL: base, Token: token}
+	status := a.fetchPoolStatus(r.Context(), pool)
+	if !status.OK {
+		httpx.WriteJSON(w, http.StatusBadGateway, map[string]any{
+			"ok":    false,
+			"error": status.Error,
+		})
+		return
+	}
+	meta, metaErr := a.poolHTTP(r.Context(), pool, http.MethodGet, "/api/v1/meta", nil)
+	if metaErr != nil || !json.Valid(meta) {
+		meta = nil
+	}
+	var live struct {
+		Pool struct {
+			ID          string `json:"id"`
+			Count       int    `json:"count"`
+			Healthy     int    `json:"healthy"`
+			PrivateHost string `json:"private_host"`
+			PublicHost  string `json:"public_host"`
+			MuxPort     int    `json:"mux_port"`
+		} `json:"pool"`
+	}
+	_ = json.Unmarshal(status.Status, &live)
+	var details struct {
+		Pool struct {
+			ID string `json:"id"`
+		} `json:"pool"`
+		API struct {
+			PrivateURL string `json:"private_url"`
+			PublicURL  string `json:"public_url"`
+		} `json:"api"`
+		Deploy struct {
+			InstanceCount int `json:"instance_count"`
+			PortStart     int `json:"port_start"`
+			PortEnd       int `json:"port_end"`
+		} `json:"deploy"`
+	}
+	if meta != nil {
+		_ = json.Unmarshal(meta, &details)
+	}
+	name := strings.TrimSpace(live.Pool.ID)
+	if name == "" {
+		name = strings.TrimSpace(details.Pool.ID)
+	}
+	if name == "" {
+		name = "静态池"
+	}
+	if len(name) > 70 {
+		name = name[:70]
+	}
+	scope := poolScopePublic
+	if strings.Contains(base, ".insta.internal") || live.Pool.PrivateHost != "" && strings.Contains(base, live.Pool.PrivateHost) {
+		scope = poolScopePrivate
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"pool":   status.Status,
+		"meta":   json.RawMessage(meta),
+		"status": status.Status,
+		"suggested": map[string]any{
+			"name":        name,
+			"api_url":     base,
+			"scope":       scope,
+			"private_url": details.API.PrivateURL,
+			"public_url":  details.API.PublicURL,
+			"count":       live.Pool.Count,
+			"healthy":     live.Pool.Healthy,
+			"mux_port":    live.Pool.MuxPort,
+			"port_start":  details.Deploy.PortStart,
+			"port_end":    details.Deploy.PortEnd,
+		},
+	})
+}
+
+// handlePoolMeta proxies the pool's deploy/auth metadata so the gateway page
+// can show the API URL, token hint and deploy parameters without a second
+// origin or CORS.
+func (a *Server) handlePoolMeta(w http.ResponseWriter, r *http.Request) {
+	pool, ok := a.findPool(r.PathValue("id"))
+	if !ok {
+		writeAdminError(w, http.StatusNotFound, "not_found", "池不存在")
+		return
+	}
+	data, err := a.poolHTTP(r.Context(), pool, http.MethodGet, "/api/v1/meta", nil)
+	if err != nil {
+		writeAdminError(w, http.StatusBadGateway, "pool_error", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+// handlePoolScale forwards a runtime node-count change. The pool restarts its
+// mux to expose the new count; the endpoint file is rewritten on the next
+// sync, which the page can trigger with the existing sync button.
+func (a *Server) handlePoolScale(w http.ResponseWriter, r *http.Request) {
+	pool, ok := a.findPool(r.PathValue("id"))
+	if !ok {
+		writeAdminError(w, http.StatusNotFound, "not_found", "池不存在")
+		return
+	}
+	var body struct {
+		Count int `json:"count"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_body", "请求体无效")
+		return
+	}
+	if body.Count < 1 || body.Count > 64 {
+		writeAdminError(w, http.StatusBadRequest, "invalid_count", "节点数量需为 1-64")
+		return
+	}
+	payload, _ := json.Marshal(map[string]int{"count": body.Count})
+	data, err := a.poolHTTP(r.Context(), pool, http.MethodPost, "/api/v1/scale", payload)
+	if err != nil {
+		writeAdminError(w, http.StatusBadGateway, "pool_error", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	if json.Valid(data) {
+		_, _ = w.Write(data)
+		return
+	}
+	_, _ = w.Write([]byte(`{"queued":true}`))
+}
