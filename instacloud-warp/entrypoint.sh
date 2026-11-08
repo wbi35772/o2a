@@ -76,7 +76,7 @@ load_scale() {
   [[ -f "$SCALE_FILE" ]] || return 0
   local v
   v=$(tr -dc '0-9' <"$SCALE_FILE" 2>/dev/null || true)
-  if [[ -n "$v" ]] && ((10#$v >= 1 && 10#$v <= 256)); then
+  if [[ -n "$v" ]] && ((10#$v >= 1 && 10#$v <= 1024)); then
     INSTANCE_COUNT=$((10#$v))
     POOL_SIZE="$INSTANCE_COUNT"
     log "scale: persisted instance count ${INSTANCE_COUNT}"
@@ -90,7 +90,7 @@ scale_pool() {
   local target=$1 old=$INSTANCE_COUNT i port dir ep_count
   [[ "$target" =~ ^[0-9]+$ ]] || { log "scale: invalid count '$target'"; return 1; }
   target=$((10#$target))
-  ((target >= 1 && target <= 256)) || { log "scale: count must be 1-256"; return 1; }
+  ((target >= 1 && target <= 1024)) || { log "scale: count must be 1-1024"; return 1; }
   ep_count=$(grep -cEv '^[[:space:]]*(#|$)' "$ENDPOINTS_FILE" 2>/dev/null || printf '0')
   ((target <= ep_count)) || { log "scale: target $target exceeds endpoint pool ($ep_count)"; return 1; }
   if [[ -n "$MUX_PORT" ]]; then

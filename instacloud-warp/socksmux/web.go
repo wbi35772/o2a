@@ -214,11 +214,11 @@ pre{background:#0d1117;border:1px solid var(--line);border-radius:10px;padding:1
         <div class="kv"><span class="k">节点端口范围</span><code id="scalePorts" class="mono">-</code><span></span><span></span></div>
         <div class="kv"><span class="k">Mux 端口</span><code id="scaleMux" class="mono">-</code><span></span><span></span></div>
         <div class="form" style="margin-top:12px">
-          <div><label>目标节点数（1-256）</label><input id="scaleCount" type="number" min="1" max="256"></div>
+          <div><label>目标节点数（1-1024）</label><input id="scaleCount" type="number" min="1" max="1024"></div>
           <div><button class="primary" onclick="applyScale()">应用扩缩容</button></div>
         </div>
         <p class="hint">扩容会启动新 wireproxy 并重启 mux，API 和 SOCKS 会中断几秒；已注册账号保留。缩容会停掉尾部节点。目标值持久化到 /data/control/scale，重启后仍生效。</p>
-        <p class="hint">端口上限由 <code>scale_max</code> 决定；超过 256 或与 mux 端口冲突会被拒绝。</p>
+        <p class="hint">端口上限由 <code>scale_max</code> 决定；超过 1024 或与 mux 端口冲突会被拒绝。</p>
       </div>
       <div class="card">
         <h2 style="margin-top:0">换地区 / 多池</h2>
@@ -451,7 +451,7 @@ async function saveConfig(){
 }
 async function applyScale(){
   const count=Number($('scaleCount').value);
-  if(!Number.isInteger(count)||count<1||count>256){toast('节点数需为 1-256 的整数',true);return}
+  if(!Number.isInteger(count)||count<1||count>1024){toast('节点数需为 1-1024 的整数',true);return}
   if(!confirm('扩缩容会重启 mux，API 和 SOCKS 会中断几秒。继续？'))return;
   try{
     await api('/api/v1/scale',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({count})});
