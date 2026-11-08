@@ -414,8 +414,8 @@ func (a *apiServer) handleMeta(w http.ResponseWriter, r *http.Request) {
 		return regions[i].Loc < regions[j].Loc
 	})
 	scaleMax := len(endpoints)
-	if scaleMax == 0 || scaleMax > 64 {
-		scaleMax = 64
+	if scaleMax == 0 || scaleMax > 256 {
+		scaleMax = 256
 	}
 	deploy := metaDeploy{
 		StateDir:         envString("STATE_DIR", a.stateDir),
@@ -465,8 +465,8 @@ func (a *apiServer) handleScale(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	if body.Count < 1 || body.Count > 64 {
-		writeErr(w, http.StatusBadRequest, "count must be between 1 and 64")
+	if body.Count < 1 || body.Count > 256 {
+		writeErr(w, http.StatusBadRequest, "count must be between 1 and 256")
 		return
 	}
 	if a.muxPort > 0 && a.m.basePort <= a.muxPort && a.muxPort <= a.m.basePort+body.Count-1 {
