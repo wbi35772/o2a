@@ -9,6 +9,8 @@
 !webui/**
 !config.example.json
 !docker-entrypoint.sh
+!pool-sync.sh
+!boot.sh
 !proxyctl
 !opencode2api-wrapper.sh
 !Dockerfile

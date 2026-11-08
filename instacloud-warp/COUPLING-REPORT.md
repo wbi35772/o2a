@@ -5,14 +5,6 @@
 > 网关源码基准：旧 `main@58f56676`；新 `origin/warp-fusion@f7506bd`（含 `docs/warp-fusion-handoff.zh.md`）
 > 结论一句话：**旧 main 下必须 `warp.enabled=false` 才能用本池；warp-fusion 下用 `warp.enabled=true + warp.direct_fallback=false + proxies=[] + static_proxy_rate_limit_cooldown_seconds=900` 实现「本地 WARP 池 + 外部静态 SOCKS5 池」双池融合，本池作为外部池并行生效。**
 
-> **校正（Session A，2026-11-07）**：本报告基于旧基线 `main@58f56676`，其中「`warp.enabled` 与 `proxyfile` 互斥」「用本池必须 `warp.enabled=false`」「`free_tier_block_seconds`」均为旧契约。`warp-fusion` 分支已改为双池同时启用：
-> - `warp.enabled = true` 且 `proxyfile` 指向 16 行清单，两个池按可用容量融合调度；
-> - `warp.direct_fallback = false`，宿主直连不进入匿名池；
-> - 静态出口额度 429 使用 `performance.static_proxy_rate_limit_cooldown_seconds: 900`，不是 `free_tier_block_seconds`；
-> - 单一请求内可 static→warp 跨池 Fallback；静态池全冷却时 100% 让位 WARP，且不误触熔断。
->
-> 本报告其余 producer 侧内容（端口、认证、换血、去重、防火墙）仍然有效。权威契约见 `docs/warp-fusion-handoff.zh.md`。
-
 ---
 
 ## 0. 一页结论（TL;DR）
@@ -333,6 +325,8 @@ docker logs -f warp-pool-producer   # 等到 Active Unique /64 Pool Size: 16 / 1
 sudo bash scripts/firewall-allow-center.sh
 bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 ```
+
+无公网入站时（PaaS/NAT），跳过 `firewall-allow-center.sh`，用 `scripts/bore-supervisor.sh` 把 `127.0.0.1:1081..1096` 映射到 `BORE_SERVER:BORE_PORT_START..`，并把清单换成中继地址；详见 README「无公网入站：bore 中继」。
 
 ### 9.2 旧 main（模式 A）
 

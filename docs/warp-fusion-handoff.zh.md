@@ -1,5 +1,8 @@
 # WARP 双池融合：交付与对接报告（Session A → Session B）
 
+> 部署形态已更新：pool 控制面、mux 统一入口、主容器 `pool-sync.sh` 见
+> [`dual-container-deploy.zh.md`](dual-container-deploy.zh.md)。本文第 8 节“固定 16 行、无需同步”的旧结论仅适用于裸机直连；InstaCloud 私网拉取使用 `pool-sync.sh`。
+
 > 分支：`warp-fusion`（基于 `warp-stability@397ca30`，已合并 `instacloud-warp@809071d` 的完整 producer）
 > 日期：2026-11-07
 > 状态：代码已提交；`gofmt` 干净；`CGO_ENABLED=0 go build ./...` 通过；`go test ./...` 全绿；沙箱已接入真实 16 端口 producer 并完成 4 项验收；生产未部署

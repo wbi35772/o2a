@@ -21,7 +21,19 @@ HEALTH_INTERVAL="${HEALTH_INTERVAL:-300}"
 ENDPOINTS_FILE="${ENDPOINTS_FILE:-/usr/local/share/warp-pool/endpoints.txt}"
 EXTERNAL_HOST="${EXTERNAL_HOST:-}"
 KEEPALIVE="${WGCF_KEEPALIVE:-25}"
+MUX_PORT="${MUX_PORT:-}"
+MUX_LISTEN="${MUX_LISTEN:-0.0.0.0}"
+WIREPROXY_BIND_HOST="${WIREPROXY_BIND_HOST:-0.0.0.0}"
 DENY_48_PREFIXES="${DENY_48_PREFIXES:-2a09:bac5:55 2a09:bac1:65 2a09:bac5:c82 2a09:bac1:27b 2a09:bac1:1e}"
+API_TOKEN="${API_TOKEN:-${POOL_API_TOKEN:-}}"
+POOL_ID="${POOL_ID:-$(hostname 2>/dev/null || printf 'warp-pool')}"
+POOL_PUBLIC_HOST="${POOL_PUBLIC_HOST:-}"
+POOL_PRIVATE_HOST="${POOL_PRIVATE_HOST:-}"
+MIN_HEALTHY="${MIN_HEALTHY:-14}"
+CONTROL_DIR="$STATE_DIR/control"
+QUEUE_DIR="$CONTROL_DIR/queue"
+DISABLED_FILE="$CONTROL_DIR/disabled"
+CONFIG_FILE="$CONTROL_DIR/config.json"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
@@ -32,10 +44,132 @@ declare -A STATUS=()
 declare -a WIREPROXY_PIDS=()
 LAST_WORKING_PORT=""
 PUBLIC_HOST=""
+MUX_PID=""
+FORCE_REROLL=0
 
 inst_name() { printf 'n%02d' "$1"; }
 inst_dir() { printf '%s/instances/%s' "$STATE_DIR" "$(inst_name "$1")"; }
 port_for() { printf '%d' $((START_PORT + $1 - 1)); }
+
+LAST_ROTATION=""
+ROTATION_CHANGED=0
+
+load_runtime_config() {
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  local v
+  v=$(jq -r '.rotation_interval_seconds // empty' "$CONFIG_FILE" 2>/dev/null || true)
+  [[ "$v" =~ ^[0-9]+$ ]] && REROLL_INTERVAL="$v"
+  v=$(jq -r '.reroll_batch // empty' "$CONFIG_FILE" 2>/dev/null || true)
+  [[ "$v" =~ ^[0-9]+$ ]] && REROLL_BATCH="$v"
+  v=$(jq -r '.health_interval_seconds // empty' "$CONFIG_FILE" 2>/dev/null || true)
+  [[ "$v" =~ ^[0-9]+$ ]] && HEALTH_INTERVAL="$v"
+  v=$(jq -r '.min_healthy // empty' "$CONFIG_FILE" 2>/dev/null || true)
+  [[ "$v" =~ ^[0-9]+$ ]] && MIN_HEALTHY="$v"
+  if [[ "$REROLL_INTERVAL" != "$LAST_ROTATION" ]]; then
+    LAST_ROTATION="$REROLL_INTERVAL"
+    ROTATION_CHANGED=1
+  fi
+}
+
+user_index() {
+  local u=$1 n
+  [[ "$u" == "$SOCKS_USER"* ]] || return 1
+  n=${u#"$SOCKS_USER"}
+  [[ "$n" =~ ^[0-9]+$ ]] || return 1
+  n=$((10#$n))
+  ((n >= 1 && n <= INSTANCE_COUNT)) || return 1
+  printf '%d' "$n"
+}
+
+is_disabled() {
+  [[ -f "$DISABLED_FILE" ]] || return 1
+  grep -qxF -- "$1" "$DISABLED_FILE"
+}
+
+set_disabled() {
+  local u=$1 mode=$2 tmp
+  mkdir -p "$CONTROL_DIR"
+  touch "$DISABLED_FILE"
+  if [[ "$mode" == "on" ]]; then
+    grep -qxF -- "$u" "$DISABLED_FILE" || printf '%s\n' "$u" >>"$DISABLED_FILE"
+    return 0
+  fi
+  tmp="$DISABLED_FILE.tmp"
+  grep -vxF -- "$u" "$DISABLED_FILE" >"$tmp" || true
+  mv "$tmp" "$DISABLED_FILE"
+}
+
+stop_node() {
+  local i=$1 dir port
+  dir=$(inst_dir "$i")
+  port=$(port_for "$i")
+  stop_wireproxy "$dir"
+  status_set "$port" 0 "${EP_USED[$port]:-}" "" "" "disabled"
+  flush_status
+  log "node $(inst_name "$i") disabled (port $port stopped)"
+}
+
+start_node() {
+  local i=$1 user dir port
+  dir=$(inst_dir "$i")
+  port=$(port_for "$i")
+  user="${SOCKS_USER}$(printf '%02d' "$i")"
+  set_disabled "$user" off
+  if bring_up "$i"; then
+    log "node $(inst_name "$i") enabled"
+  else
+    log "WARN node $(inst_name "$i") enable failed"
+  fi
+  flush_status
+}
+
+process_queue() {
+  local f cmd action user idx
+  [[ -d "$QUEUE_DIR" ]] || return 0
+  while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    cmd=$(head -n1 "$f" 2>/dev/null || true)
+    rm -f "$f"
+    action=${cmd%% *}
+    user=${cmd#* }
+    case "$action" in
+      reroll-all)
+        log "control: reroll-all requested"
+        FORCE_REROLL=1
+        ;;
+      reload-config)
+        log "control: reload-config requested"
+        load_runtime_config
+        ;;
+      rotate)
+        if idx=$(user_index "$user"); then
+          is_disabled "$user" && { log "control: rotate $user ignored (disabled)"; continue; }
+          log "control: rotate $user"
+          reroll_instance "$idx" || log "control: rotate $user failed"
+          write_egress
+        fi
+        ;;
+      enable)
+        if idx=$(user_index "$user"); then
+          log "control: enable $user"
+          start_node "$idx"
+          write_egress
+        fi
+        ;;
+      disable)
+        if idx=$(user_index "$user"); then
+          log "control: disable $user"
+          set_disabled "$user" on
+          stop_node "$idx"
+          write_egress
+        fi
+        ;;
+      *)
+        [[ -n "$cmd" ]] && log "control: unknown command '$cmd'"
+        ;;
+    esac
+  done < <(find "$QUEUE_DIR" -maxdepth 1 -type f -name '*.cmd' 2>/dev/null | sort)
+}
 
 status_set() {
   local port=$1; shift
@@ -178,7 +312,7 @@ render_conf() {
   cat >>"$tmp.2" <<EOF
 
 [Socks5]
-BindAddress = 0.0.0.0:${port}
+BindAddress = ${WIREPROXY_BIND_HOST}:${port}
 Username = ${SOCKS_USER}
 Password = ${SOCKS_PASS}
 EOF
@@ -399,6 +533,7 @@ dedup_pass() {
   for ((i = 1; i <= INSTANCE_COUNT; i++)); do
     port=$(port_for "$i")
     dir=$(inst_dir "$i")
+    is_disabled "${SOCKS_USER}$(printf '%02d' "$i")" && continue
     [[ -f "$dir/wireproxy.conf" ]] || continue
     tries=0
     while :; do
@@ -476,13 +611,18 @@ detect_host() {
 
 write_egress() {
   local i port state out="$STATE_DIR/egress-ext.txt"
-  [[ -n "$PUBLIC_HOST" ]] || PUBLIC_HOST=$(detect_host)
+  [[ -n "$PUBLIC_HOST" ]] || PUBLIC_HOST="${POOL_PUBLIC_HOST:-$(detect_host)}"
   : >"$out"
   for ((i = 1; i <= INSTANCE_COUNT; i++)); do
     port=$(port_for "$i")
+    is_disabled "${SOCKS_USER}$(printf '%02d' "$i")" && continue
     state=$(printf '%s' "${STATUS[$port]:-}" | cut -f5)
     [[ "$state" == "ok" ]] || continue
-    printf 'socks5://%s:%s@%s:%s\n' "$SOCKS_USER" "$SOCKS_PASS" "$PUBLIC_HOST" "$port" >>"$out"
+    if [[ -n "$MUX_PORT" ]]; then
+      printf 'socks5://%s%02d:%s@%s:%s\n' "$SOCKS_USER" "$i" "$SOCKS_PASS" "$PUBLIC_HOST" "$MUX_PORT" >>"$out"
+    else
+      printf 'socks5://%s:%s@%s:%s\n' "$SOCKS_USER" "$SOCKS_PASS" "$PUBLIC_HOST" "$port" >>"$out"
+    fi
   done
   if [[ ! -s "$out" ]]; then
     log "WARN no healthy SOCKS5 endpoint yet; $out is empty"
@@ -501,6 +641,40 @@ print_egress_block() {
   printf '\n'
 }
 
+start_mux() {
+  [[ -n "$MUX_PORT" ]] || return 0
+  local last_port=$((START_PORT + INSTANCE_COUNT - 1))
+  if ((MUX_PORT >= START_PORT && MUX_PORT <= last_port)); then
+    log "WARN MUX_PORT ${MUX_PORT} is inside the wireproxy range ${START_PORT}-${last_port}; mux disabled until START_PORT moves past it"
+    return 0
+  fi
+  log "starting socks mux on ${MUX_LISTEN}:${MUX_PORT} -> 127.0.0.1:${START_PORT}-${last_port}"
+  /usr/local/bin/socksmux \
+    -listen "${MUX_LISTEN}:${MUX_PORT}" \
+    -backend-host 127.0.0.1 \
+    -base-port "$START_PORT" \
+    -count "$INSTANCE_COUNT" \
+    -upstream-user "$SOCKS_USER" \
+    -upstream-pass "$SOCKS_PASS" \
+    -client-pass "$SOCKS_PASS" \
+    -api-token "$API_TOKEN" \
+    -state-dir "$STATE_DIR" \
+    -public-host "${POOL_PUBLIC_HOST:-$PUBLIC_HOST}" \
+    -private-host "$POOL_PRIVATE_HOST" \
+    -pool-id "$POOL_ID" \
+    -rotation-interval "$REROLL_INTERVAL" \
+    -reroll-batch "$REROLL_BATCH" \
+    -health-interval "$HEALTH_INTERVAL" \
+    -min-healthy "$MIN_HEALTHY" \
+    -mux-port "$MUX_PORT" >>"$STATE_DIR/socksmux.log" 2>&1 &
+  MUX_PID=$!
+  sleep 0.5
+  if ! kill -0 "$MUX_PID" 2>/dev/null; then
+    log "WARN socks mux failed to start; see $STATE_DIR/socksmux.log"
+    MUX_PID=""
+  fi
+}
+
 health_pass() {
   local i port dir res prefix ip loc pid state changed=0
   local -A hseen=()
@@ -509,6 +683,9 @@ health_pass() {
   mkdir -p "$tmpd"
   for ((i = 1; i <= INSTANCE_COUNT; i++)); do
     port=$(port_for "$i")
+    if is_disabled "${SOCKS_USER}$(printf '%02d' "$i")"; then
+      continue
+    fi
     (probe "$port" >"$tmpd/$port" 2>/dev/null || true) &
     probe_pids+=("$!")
   done
@@ -518,6 +695,10 @@ health_pass() {
   for ((i = 1; i <= INSTANCE_COUNT; i++)); do
     port=$(port_for "$i")
     dir=$(inst_dir "$i")
+    if is_disabled "${SOCKS_USER}$(printf '%02d' "$i")"; then
+      status_set "$port" 0 "${EP_USED[$port]:-}" "" "" "disabled"
+      continue
+    fi
     res=$(cat "$tmpd/$port" 2>/dev/null || true)
     prefix=""
     ip=""
@@ -574,6 +755,7 @@ reroll_all_batched() {
       end=$INSTANCE_COUNT
     fi
     for ((i = batch_start; i <= end; i++)); do
+      is_disabled "${SOCKS_USER}$(printf '%02d' "$i")" && continue
       reroll_instance "$i" || log "reroll failed for $(inst_name "$i")"
     done
     batch_start=$((end + 1))
@@ -585,6 +767,10 @@ reroll_all_batched() {
 
 cleanup() {
   local pid f
+  if [[ -n "$MUX_PID" ]]; then
+    log "stopping socks mux"
+    kill "$MUX_PID" 2>/dev/null || true
+  fi
   log "stopping wireproxy instances"
   if ((${#WIREPROXY_PIDS[@]})); then
     for pid in "${WIREPROXY_PIDS[@]}"; do
@@ -600,16 +786,18 @@ cleanup() {
 }
 
 main() {
-  mkdir -p "$STATE_DIR/instances"
+  mkdir -p "$STATE_DIR/instances" "$QUEUE_DIR"
+  load_runtime_config
   [[ -r "$ENDPOINTS_FILE" ]] || die "endpoint pool file not found: $ENDPOINTS_FILE"
   mapfile -t ENDPOINTS < <(grep -Ev '^[[:space:]]*(#|$)' "$ENDPOINTS_FILE")
   ((${#ENDPOINTS[@]} >= INSTANCE_COUNT)) ||
     die "need at least ${INSTANCE_COUNT} endpoints, found ${#ENDPOINTS[@]} in $ENDPOINTS_FILE"
 
-  PUBLIC_HOST=$(detect_host)
+  PUBLIC_HOST="${POOL_PUBLIC_HOST:-$(detect_host)}"
   local last_port=$((START_PORT + INSTANCE_COUNT - 1))
   log "warp-pool-producer starting: ${INSTANCE_COUNT} instances, ports ${START_PORT}-${last_port}, host=$PUBLIC_HOST"
   log "reroll=${REROLL_INTERVAL}s batch=${REROLL_BATCH} probe=${PROBE_URL}"
+  start_mux
 
   local i boot_start boot_elapsed next_reroll now sleep_for remaining
   boot_start=$(date +%s)
@@ -625,19 +813,33 @@ main() {
   print_egress_block
 
   next_reroll=$(($(date +%s) + REROLL_INTERVAL))
+  local next_health
+  next_health=$(($(date +%s) + HEALTH_INTERVAL))
   while :; do
-    now=$(date +%s)
-    sleep_for=$HEALTH_INTERVAL
-    remaining=$((next_reroll - now))
-    if ((remaining < sleep_for)); then
-      sleep_for=$remaining
+    process_queue
+    load_runtime_config
+    if ((ROTATION_CHANGED)); then
+      ROTATION_CHANGED=0
+      next_reroll=$(($(date +%s) + REROLL_INTERVAL))
+      log "control: rotation interval now ${REROLL_INTERVAL}s"
     fi
-    if ((sleep_for < 1)); then
-      sleep_for=1
-    fi
-    sleep "$sleep_for"
-    health_pass
     now=$(date +%s)
+    if ((FORCE_REROLL)); then
+      FORCE_REROLL=0
+      reroll_all_batched
+      dedup_pass
+      deny_summary
+      write_egress
+      print_egress_block
+      next_reroll=$(($(date +%s) + REROLL_INTERVAL))
+      next_health=$(($(date +%s) + HEALTH_INTERVAL))
+      continue
+    fi
+    if ((now >= next_health)); then
+      health_pass
+      next_health=$(($(date +%s) + HEALTH_INTERVAL))
+      continue
+    fi
     if ((now >= next_reroll)); then
       reroll_all_batched
       dedup_pass
@@ -645,7 +847,20 @@ main() {
       write_egress
       print_egress_block
       next_reroll=$(($(date +%s) + REROLL_INTERVAL))
+      next_health=$(($(date +%s) + HEALTH_INTERVAL))
+      continue
     fi
+    sleep_for=$((next_health - now))
+    if ((next_reroll - now < sleep_for)); then
+      sleep_for=$((next_reroll - now))
+    fi
+    if ((sleep_for > 5)); then
+      sleep_for=5
+    fi
+    if ((sleep_for < 1)); then
+      sleep_for=1
+    fi
+    sleep "$sleep_for"
   done
 }
 

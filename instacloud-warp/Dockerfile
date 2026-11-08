@@ -30,6 +30,9 @@ RUN mkdir -p /out && git clone "${WIREPROXY_REPO}" wireproxy && \
     cd wireproxy && git checkout "${WIREPROXY_REF}" && \
     CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /out/wireproxy ./cmd/wireproxy
 
+COPY socksmux /src/socksmux
+RUN cd /src/socksmux && CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /out/socksmux .
+
 FROM ${RUNTIME_IMAGE}
 
 ARG APK_MIRROR_HOST
@@ -37,13 +40,14 @@ ARG APK_MIRROR_HOST
 RUN if [ "${APK_MIRROR_HOST}" != "dl-cdn.alpinelinux.org" ]; then \
       sed -i "s#dl-cdn.alpinelinux.org#${APK_MIRROR_HOST}#g" /etc/apk/repositories; \
     fi && \
-    apk add --no-cache bash curl ca-certificates tzdata && \
+    apk add --no-cache bash curl ca-certificates tzdata jq && \
     addgroup -S warp && adduser -S -G warp -h /data warp && \
     mkdir -p /data/instances /usr/local/share/warp-pool && \
     chown -R warp:warp /data
 
 COPY --from=build /out/wgcf /usr/local/bin/wgcf
 COPY --from=build /out/wireproxy /usr/local/bin/wireproxy
+COPY --from=build /out/socksmux /usr/local/bin/socksmux
 COPY endpoints.txt /usr/local/share/warp-pool/endpoints.txt
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck.sh

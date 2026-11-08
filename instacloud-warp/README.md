@@ -26,6 +26,7 @@ warp-pool-producer/
 ├── patches/wgcf-socks5-proxy.patch
 ├── scripts/export-egress.sh       # 一键导出 + --verify 自检
 ├── scripts/firewall-allow-center.sh
+├── scripts/bore-supervisor.sh     # NAT/PaaS 无公网入站时的 bore 中继保活
 ├── .env.example
 ├── Makefile
 └── README.md
@@ -34,7 +35,7 @@ warp-pool-producer/
 ## 前置条件
 
 - 异国 Linux VPS（JP / KR / GB / AU），已安装 Docker 与 compose v2。
-- 节点有公网 IPv4，供中心三台容器连接。
+- 节点有公网 IPv4，或可用 bore 中继（见「无公网入站：bore 中继」）。
 - 出站 UDP 到 Cloudflare Anycast 的 `2408 / 500 / 1701 / 4500` 未被封。
 - 不需要宿主机 IPv6、不需要 TUN、不需要 `--privileged`。
 - 必须部署在 Linux 上：`network_mode: host` 在 Docker Desktop（Windows/macOS）不适用。
@@ -84,13 +85,40 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --out egress-ext.txt
 bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 ```
 
+### 无公网入站：bore 中继（可选）
+
+PaaS/免费容器常没有可入站公网端口。此时让 producer 继续监听 `127.0.0.1:1081..1096`，用 `bore` 把每个端口映射到公网中继：
+
+```bash
+# 默认 127.0.0.1:1081-1096 -> bore.pub:40001-40016
+nohup bash scripts/bore-supervisor.sh > /tmp/bore-supervisor.out 2>&1 &
+
+# 自定义端口段（例如第二节点）
+PORT_START=2081 PORT_END=2096 BORE_PORT_START=41001 \
+  nohup bash scripts/bore-supervisor.sh > /tmp/bore-supervisor.out 2>&1 &
+```
+
+- 映射是线性的：`remote = BORE_PORT_START + (local - PORT_START)`。
+- 脚本每 `CHECK_INTERVAL`（默认 30s）检查一次，只重启掉线的端口；pidfile 与日志在 `LOG_DIR`（默认 `/tmp`）。
+- 交给网关的清单改用中继地址：`socks5://warpuser:WarpPass2026@bore.pub:40001..40016`。
+- 免费 `bore.pub` 对同一源 IP 有并发隧道上限；16 条已接近上限。需要更多端口时换自建 `bore server`（`BORE_SERVER`）或分节点。
+- `bore` 二进制默认自动下载到 `/tmp/bore`；离线环境用 `BORE_BIN` 指定已有二进制。
+
 ## 配置项
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `EXTERNAL_HOST` | 自动探测 | 写入清单的公网 IPv4；建议显式填写 |
-| `START_PORT` | `1081` | 首个 SOCKS5 端口 |
+| `START_PORT` | `1081` | 首个 SOCKS5 端口；mux 模式请设为 `MUX_PORT+1` 或更高 |
 | `POOL_SIZE` / `INSTANCE_COUNT` | `16` | 实例数（两变量等价，任一设置即可） |
+| `MUX_PORT` | 空 | 管理面/统一入口端口；空=独立端口模式，不启动控制面 |
+| `MUX_LISTEN` | `0.0.0.0` | 管理面监听地址 |
+| `WIREPROXY_BIND_HOST` | `0.0.0.0` | 单个 wireproxy 监听地址；mux 模式建议 `127.0.0.1` |
+| `API_TOKEN` | 空 | `/api/v1/*` 的 Bearer token；空=关闭管理 API |
+| `POOL_PUBLIC_HOST` | 空 | 写进公网清单的主机名；空=自动探测/`EXTERNAL_HOST` |
+| `POOL_PRIVATE_HOST` | 空 | 私网主机名，用于 `scope=private` 清单；空=私网清单 409 |
+| `POOL_ID` | 主机名 | 控制面展示的池 ID |
+| `MIN_HEALTHY` | `14` | 健康检查要求的最小 ok 实例数 |
 | `SOCKS_USER` / `SOCKS_PASS` | `warpuser` / `WarpPass2026` | SOCKS5 账密 |
 | `REROLL_INTERVAL` | `900` | 全量换血周期（秒），对齐网关额度 429 硬冷却（`static_proxy_rate_limit_cooldown_seconds=900`） |
 | `REROLL_BATCH` | `4` | 换血每批实例数 |
@@ -102,6 +130,29 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 | `HEALTH_INTERVAL` | `300` | 健康检查周期（秒） |
 | `ENDPOINTS_FILE` | 镜像内 `/usr/local/share/warp-pool/endpoints.txt` | Endpoint 池 |
 | `DENY_48_PREFIXES` | 见 `.env.example` | 禁止出现的 `/48` 家族 |
+
+## 管理面与统一入口（可选）
+
+设置 `MUX_PORT` 后，`socksmux` 在同一个端口上按首字节分流：
+
+- 首字节 `0x05` → SOCKS5，客户端用 `warpuser01..NN` 选择后端，密码统一为 `SOCKS_PASS`。
+- 其它 → HTTP 管理面/Web UI。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/healthz` | 免 token；健康实例数 ≥ `MIN_HEALTHY` 返回 200 |
+| `GET` | `/api/v1/status` | 池状态、实例、端口、出口 IP、统计 |
+| `GET` | `/api/v1/endpoints?scope=private\|public` | 端点清单（每行一个 `socks5://`） |
+| `GET` / `PUT` | `/api/v1/config` | 读取/更新可热改参数 |
+| `GET` | `/api/v1/logs?lines=N` | 最近日志 |
+| `POST` | `/api/v1/reroll` | 触发一轮换血 |
+| `POST` | `/api/v1/nodes/{user}/{rotate\|enable\|disable}` | 单节点操作 |
+
+除 `/healthz` 外都需要 `Authorization: Bearer <API_TOKEN>`；Web UI 在 `/`，token 存浏览器 `localStorage`。
+
+InstaCloud 这类只暴露一个端口的平台：设 `MUX_PORT=1081`、`START_PORT=1082`、`WIREPROXY_BIND_HOST=127.0.0.1`，并把服务端口指到 `1081`。`POOL_PRIVATE_HOST` 填平台私网主机名即可让主容器通过 `scope=private` 拉取；公网清单用 `POOL_PUBLIC_HOST`。
+
+主容器侧用仓库根目录的 `pool-sync.sh` 拉取清单并触发热加载；所有地址和 token 都从环境变量/`POOL_ENV_FILE` 读取，不写死。
 
 ## 运行机制
 
@@ -231,6 +282,7 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 | 端口不监听 | `docker exec warp-pool-producer wireproxy -n -c /data/instances/nXX/wireproxy.conf` |
 | 中心连不上 | 检查 `EXTERNAL_HOST`、安全组、`firewall-allow-center.sh` 是否执行 |
 | `permission denied: /data` | 使用 named volume；bind mount 时把目录 `chown` 给容器内 `warp` 用户 |
+| bore 中继掉线 / 端口被占用 | `bore.pub` 对同源 IP 有并发上限；看 `/tmp/bore-<port>.log` 是否 `port already in use`；减少端口或换 `BORE_SERVER`，supervisor 会自动重试 |
 | Docker Desktop 上端口异常 | 本项目要求 Linux 主机 + host 网络 |
 
 ## 红线
