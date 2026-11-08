@@ -352,7 +352,7 @@ done
 /.insta/tools/bin/curl -s -o /dev/null -w '%{http_code}\n' \
   --socks5-hostname 127.0.0.1:21000 \
   -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer sk-001' \
+  -H 'Authorization: Bearer $API_KEY' \
   -H "x-opencode-session: ses_probe_$(date +%s)" \
   --data @/tmp/probe-body.json \
   https://opencode.ai/inference

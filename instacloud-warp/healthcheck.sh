@@ -4,8 +4,8 @@ set -euo pipefail
 STATE_DIR="${STATE_DIR:-/data}"
 STATUS_FILE="$STATE_DIR/status.tsv"
 MIN_HEALTHY="${MIN_HEALTHY:-14}"
-SOCKS_USER="${SOCKS_USER:-warpuser}"
-SOCKS_PASS="${SOCKS_PASS:-WarpPass2026}"
+SOCKS_USER="${SOCKS_USER:?SOCKS_USER must be set}"
+SOCKS_PASS="${SOCKS_PASS:?SOCKS_PASS must be set}"
 PROBE_URL="${PROBE_URL:-https://opencode.ai/cdn-cgi/trace}"
 
 [[ -s "$STATUS_FILE" ]] || exit 1

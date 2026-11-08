@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 HOST="${EXTERNAL_HOST:-}"
 SOCKS_USER="${SOCKS_USER:-warpuser}"
-SOCKS_PASS="${SOCKS_PASS:-WarpPass2026}"
+SOCKS_PASS="${SOCKS_PASS:-}"
 START_PORT="${START_PORT:-1081}"
 COUNT="${INSTANCE_COUNT:-${POOL_SIZE:-16}}"
 STATE_DIR="${STATE_DIR:-/data}"
@@ -18,7 +18,7 @@ Usage: export-egress.sh --host HOST [options]
 
   --host HOST        Public IPv4 of the WARP node (or set EXTERNAL_HOST)
   --user USER        SOCKS5 username (default: warpuser)
-  --pass PASS        SOCKS5 password (default: WarpPass2026)
+  --pass PASS        SOCKS5 password (required; or set SOCKS_PASS)
   --start-port PORT  First SOCKS5 port (default: 1081)
   --count N          Number of ports (default: 16)
   --out FILE         Output path (default: ./egress-ext.txt)
@@ -49,6 +49,10 @@ done
 
 [[ -n "$HOST" ]] || {
   echo "error: --host or EXTERNAL_HOST is required" >&2
+  exit 2
+}
+[[ -n "$SOCKS_PASS" ]] || {
+  echo "error: --pass or SOCKS_PASS is required" >&2
   exit 2
 }
 [[ "$COUNT" =~ ^[0-9]+$ ]] && ((COUNT > 0)) || {

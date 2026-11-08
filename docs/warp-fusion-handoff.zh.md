@@ -155,22 +155,22 @@ free-tier request
 ### 4.2 行格式
 
 ```text
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1081
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1082
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1083
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1084
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1085
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1086
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1087
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1088
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1089
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1090
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1091
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1092
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1093
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1094
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1095
-socks5://warpuser:WarpPass2026@JP_NODE_IP:1096
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1081
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1082
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1083
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1084
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1085
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1086
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1087
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1088
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1089
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1090
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1091
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1092
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1093
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1094
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1095
+socks5://warpuser:$SOCKS_PASS@JP_NODE_IP:1096
 ```
 
 ### 4.3 硬性约束
@@ -190,7 +190,7 @@ socks5://warpuser:WarpPass2026@JP_NODE_IP:1096
 | --- | --- | --- |
 | `INSTANCE_COUNT` / `POOL_SIZE` | 16 | 预期 16 个静态节点；文件少于 16 行属正常 |
 | `START_PORT` | 1081 | 端口 1081–1096 |
-| `SOCKS_USER` / `SOCKS_PASS` | `warpuser` / `WarpPass2026` | URL userinfo；与网关契约一致 |
+| `SOCKS_USER` / `SOCKS_PASS` | `warpuser` / `$SOCKS_PASS` | URL userinfo；与网关契约一致 |
 | `EXTERNAL_HOST` | 空则自动探测 | 写入 `egress-ext.txt` 的 `HOST`；跨机访问必须是可达的公网地址 |
 | `STATE_DIR` | `/data`（命名卷 `warp-pool-data`） | 文件位置 `/data/egress-ext.txt`，需同步到三台网关 |
 | `REROLL_INTERVAL` | 900s | 与 900s 硬冷却对齐；每 15 分钟换一批 `/64` |
@@ -289,7 +289,7 @@ docker exec warp-pool-producer sh -c 'wc -l /data/egress-ext.txt'
 # 16
 
 for p in $(seq 1081 1096); do
-  curl -sS -x socks5h://warpuser:WarpPass2026@127.0.0.1:$p \
+  curl -sS -x socks5h://warpuser:$SOCKS_PASS@127.0.0.1:$p \
     https://opencode.ai/cdn-cgi/trace | sed -n 's/^ip=//p'
 done | sort -u | wc -l
 # 16
@@ -304,10 +304,10 @@ done | sort -u | wc -l
 producer 采用「固定端口 1081–1096 + 端口背后的 WARP 隧道每 900s 分批（4×4）换血」：换血时在原端口上换 Endpoint 或重注册，绝不摘除端口。因此 `egress-ext.txt` 的 16 行是恒定静态文本：
 
 ```text
-socks5://warpuser:WarpPass2026@NODE_HOST:1081
-socks5://warpuser:WarpPass2026@NODE_HOST:1082
+socks5://warpuser:$SOCKS_PASS@NODE_HOST:1081
+socks5://warpuser:$SOCKS_PASS@NODE_HOST:1082
 ...
-socks5://warpuser:WarpPass2026@NODE_HOST:1096
+socks5://warpuser:$SOCKS_PASS@NODE_HOST:1096
 ```
 
 网关只在首次接入时写入一次并 reload；之后换血对网关完全透明，不需要 5 分钟同步任务。硬性要求：恰好 16 行、禁止 `#` 与注释、纯 `socks5://user:pass@NODE_HOST:1081..1096`；`NODE_HOST` 必须是三台网关都能到达的地址（公网 IPv4 或域名）。
@@ -328,7 +328,7 @@ ssh -N -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
   USER@ssh.instabox.sh
 ```
 
-`egress-ext.txt` 相应写成 `socks5://warpuser:WarpPass2026@127.0.0.1:22000..22015`。认证、URL 解析、冷却、Fallback 全部走同一套代码路径；生产直连时只把 `127.0.0.1:220xx` 换回 `NODE_HOST:108x`。
+`egress-ext.txt` 相应写成 `socks5://warpuser:$SOCKS_PASS@127.0.0.1:22000..22015`。认证、URL 解析、冷却、Fallback 全部走同一套代码路径；生产直连时只把 `127.0.0.1:220xx` 换回 `NODE_HOST:108x`。
 
 ### 8.2 生产直连
 
@@ -373,7 +373,7 @@ ssh -N -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 
 沙箱实测（2026-11-07，`opencode2api-2:8082`，真实 producer 16 端口经 SSH 隧道）：
 
-- 接入：Instabox `test` 上运行 `warp-pool-producer:1.2.0`（`network_mode: host`，1081–1096，`EXTERNAL_HOST=35.91.188.19`）；网关侧 `ssh -N -L 22000..22015:127.0.0.1:1081..1096` 接入，`egress-real.txt` 16 行 `socks5://warpuser:WarpPass2026@127.0.0.1:22000..22015`，`healthz` 16/16 healthy。
+- 接入：Instabox `test` 上运行 `warp-pool-producer:1.2.0`（`network_mode: host`，1081–1096，`EXTERNAL_HOST=35.91.188.19`）；网关侧 `ssh -N -L 22000..22015:127.0.0.1:1081..1096` 接入，`egress-real.txt` 16 行 `socks5://warpuser:$SOCKS_PASS@127.0.0.1:22000..22015`，`healthz` 16/16 healthy。
 - ① 分发：240 个请求全部 HTTP 200；静态成功 74（22000×12、22004×16、22006×19、22012×23、22015×4），WARP 成功 166（`c829:2446`×16、`c82a:32aa`×43、`c82a:a0`×27、`c82e:2446`×36、`c82e:2832`×44）。静态可用数 ≥ 2×WARP 可用数时恒为 static first，随出口冷却自然切到 WARP；交替分支因容量从未接近而未触发（规则见 `fusion.go`）。
 - ② 额度 429：63 次 `free_usage_limit_reached`，16 个出口全部命中；上游 `Retry-After` 38273–51214s 被忽略，按契约钉死 900s；13 次 `fused_pool_fallback` static→warp，`attempts=1/3`、`error=null`（额度冷却不置 `blocked`，不误触熔断）。样本 `req_004da1b`：22009/22010/22011 连续三次 429 → 同请求 fallback → 13:34:00.47 WARP 200（总 3.8s）。
 - ③ 全部冷却：13:24:26.86 最后一个出口 429 之后 `static_success=0`、`warp_success=140`；`healthz` `quota_hits=60`、`breaker_open=0`；WARP 承接 100% 流量。
@@ -386,7 +386,7 @@ ssh -N -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| 真实带认证 SOCKS5 | 已验证 | 16 端口 `warpuser:WarpPass2026`（`127.0.0.1:22000-22015`），请求全部 200；每端口独立 `/64` |
+| 真实带认证 SOCKS5 | 已验证 | 16 端口 `warpuser:$SOCKS_PASS`（`127.0.0.1:22000-22015`），请求全部 200；每端口独立 `/64` |
 | Producer 构建 | 已通过 | `warp-pool-producer:1.0.0` 60.6 MB；patched wgcf v2.3.1 + wireproxy；16/16 唯一 `/64` |
 | egress 文件同步 | 不需要 | 固定 16 行，首次写入；换血在 1081–1096 端口背后完成 |
 | 生产直连放行 | 未执行 | 需在三台生产执行 `firewall-allow-center.sh`；沙箱走 SSH 隧道，不代表直连连通性 |

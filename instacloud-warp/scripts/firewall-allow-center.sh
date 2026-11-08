@@ -7,7 +7,7 @@ PORTS="${PORTS:-1081:1096}"
 CENTER_IPS="${CENTER_IPS:-13.229.234.225 18.212.22.159 3.79.179.114}"
 COMMENT="${COMMENT:-warp-pool-producer}"
 SOCKS_USER="${SOCKS_USER:-warpuser}"
-SOCKS_PASS="${SOCKS_PASS:-WarpPass2026}"
+SOCKS_PASS="${SOCKS_PASS:-}"
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "error: run as root (sudo $0)" >&2

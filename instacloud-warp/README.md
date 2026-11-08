@@ -7,7 +7,7 @@
 | 项目 | 值 |
 | --- | --- |
 | 端口 | `1081`–`1096`（16 个实例） |
-| SOCKS5 认证 | `warpuser` / `WarpPass2026` |
+| SOCKS5 认证 | `warpuser` / `$SOCKS_PASS` |
 | 出口 | 纯 IPv6（`AllowedIPs = ::/0`），禁止 IPv4 出口 |
 | 去重 | 同容器内 16 个端口的 `/64` 前缀互不相同 |
 | 存量 `/48` 禁区 | SIN `2a09:bac5:55*` / `2a09:bac1:65*`；IAD `2a09:bac5:c82*`；FRA `2a09:bac1:27b*` / `2a09:bac1:1e*` |
@@ -54,9 +54,9 @@ docker logs -f warp-pool-producer
 ```text
 Active Unique /64 Pool Size: 16 / 16
 ================= egress-ext.txt (copy to session A) =================
-socks5://warpuser:WarpPass2026@NODE_PUBLIC_IP:1081
+socks5://warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1081
 ...
-socks5://warpuser:WarpPass2026@NODE_PUBLIC_IP:1096
+socks5://warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1096
 ======================================================================
 ```
 
@@ -100,7 +100,7 @@ PORT_START=2081 PORT_END=2096 BORE_PORT_START=41001 \
 
 - 映射是线性的：`remote = BORE_PORT_START + (local - PORT_START)`。
 - 脚本每 `CHECK_INTERVAL`（默认 30s）检查一次，只重启掉线的端口；pidfile 与日志在 `LOG_DIR`（默认 `/tmp`）。
-- 交给网关的清单改用中继地址：`socks5://warpuser:WarpPass2026@bore.pub:40001..40016`。
+- 交给网关的清单改用中继地址：`socks5://warpuser:$SOCKS_PASS@bore.pub:40001..40016`。
 - 免费 `bore.pub` 对同一源 IP 有并发隧道上限；16 条已接近上限。需要更多端口时换自建 `bore server`（`BORE_SERVER`）或分节点。
 - `bore` 二进制默认自动下载到 `/tmp/bore`；离线环境用 `BORE_BIN` 指定已有二进制。
 
@@ -119,7 +119,7 @@ PORT_START=2081 PORT_END=2096 BORE_PORT_START=41001 \
 | `POOL_PRIVATE_HOST` | 空 | 私网主机名，用于 `scope=private` 清单；空=私网清单 409 |
 | `POOL_ID` | 主机名 | 控制面展示的池 ID |
 | `MIN_HEALTHY` | `14` | 健康检查要求的最小 ok 实例数 |
-| `SOCKS_USER` / `SOCKS_PASS` | `warpuser` / `WarpPass2026` | SOCKS5 账密 |
+| `SOCKS_USER` / `SOCKS_PASS` | `warpuser` / `$SOCKS_PASS` | SOCKS5 账密 |
 | `REROLL_INTERVAL` | `900` | 全量换血周期（秒），对齐网关额度 429 硬冷却（`static_proxy_rate_limit_cooldown_seconds=900`） |
 | `REROLL_BATCH` | `4` | 换血每批实例数 |
 | `DEDUP_RETRIES` | `4` | 单个端口去重最大重试 |
@@ -159,7 +159,7 @@ InstaCloud 这类只暴露一个端口的平台：设 `MUX_PORT=1081`、`START_P
 ### B1 链式注册
 
 - `n01` 使用容器原生网络直连 `wgcf register --accept-tos`。
-- `n02` 起通过 `HTTPS_PROXY=socks5h://warpuser:WarpPass2026@127.0.0.1:LAST_WORKING_PORT` 借道前一个已探活端口的 WARP `/64` 注册。
+- `n02` 起通过 `HTTPS_PROXY=socks5h://warpuser:$SOCKS_PASS@127.0.0.1:LAST_WORKING_PORT` 借道前一个已探活端口的 WARP `/64` 注册。
 - wgcf 原生 uTLS 传输会绕过 `HTTPS_PROXY`，镜像构建时应用 `patches/wgcf-socks5-proxy.patch`：TCP 连接走 SOCKS5，uTLS 握手仍端到端到 Cloudflare。
 - 失败处理：删除损坏的 `wgcf-account.toml`，等待 15 秒重试；链式连续失败后回退直连。
 - 账号保存在 `/data/instances/nXX/`，容器重启复用，不重复注册。
@@ -212,7 +212,7 @@ InstaCloud 这类只暴露一个端口的平台：设 `MUX_PORT=1081`、`START_P
 3. 抽检 IPv6 出口：
 
    ```bash
-   curl -sS -m 10 --socks5-hostname 'warpuser:WarpPass2026@NODE_PUBLIC_IP:1081' \
+   curl -sS -m 10 --socks5-hostname 'warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1081' \
      https://opencode.ai/cdn-cgi/trace | grep '^ip='
    ```
 
@@ -254,7 +254,7 @@ InstaCloud 这类只暴露一个端口的平台：设 `MUX_PORT=1081`、`START_P
 - 中心侧连通性验证：
 
   ```bash
-  curl -sS -m 10 --socks5-hostname 'warpuser:WarpPass2026@NODE_PUBLIC_IP:1081' \
+  curl -sS -m 10 --socks5-hostname 'warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1081' \
     https://opencode.ai/cdn-cgi/trace
   ```
 

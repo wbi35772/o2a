@@ -225,16 +225,16 @@ register(n1 直连；n2+ 经上一条 SOCKS5 链式注册)
 ### 5.1 清单格式（硬性）
 
 ```
-socks5://warpuser:WarpPass2026@NODE_PUBLIC_IP:1081
-socks5://warpuser:WarpPass2026@NODE_PUBLIC_IP:1082
+socks5://warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1081
+socks5://warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1082
 ...
-socks5://warpuser:WarpPass2026@NODE_PUBLIC_IP:1096
+socks5://warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1096
 ```
 
 - 恰好 `POOL_SIZE` 行（默认 16），UTF-8，无 BOM，LF 或 CRLF 均可。
 - **任何位置不得出现 `#` 字符**（包括行尾注释）。
 - `socks5://` 与 `socks5h://` 在网关侧等价：Go 的 `http.ProxyURL` 对主机名目标把域名交给代理解析（`pool.go:471-481`），因此 DNS 在节点侧完成——这对纯 IPv6 隧道是必要条件。
-- 账号密码可含 URL 保留字符时需百分号编码；当前 `WarpPass2026` 无需编码。
+- 账号密码可含 URL 保留字符时需百分号编码；当前 `$SOCKS_PASS` 无需编码。
 
 ### 5.2 语义
 
@@ -303,10 +303,10 @@ t=1200s    健康检查（300s 周期）收敛任何撞车
 
 ## 8. 安全模型
 
-- **双层准入**：SOCKS5 账密（`warpuser` / `WarpPass2026`）+ 节点防火墙源 IP 白名单（SIN `13.229.234.225`、IAD `18.212.22.159`、FRA `3.79.179.114`）。
+- **双层准入**：SOCKS5 账密（`warpuser` / `$SOCKS_PASS`）+ 节点防火墙源 IP 白名单（SIN `13.229.234.225`、IAD `18.212.22.159`、FRA `3.79.179.114`）。
 - 容器 `cap_drop: ALL`、`network_mode: host`（让 INPUT 白名单真正生效），不挂 docker.sock，不 privileged。
 - `/data` 含 WireGuard 私钥：备份加密、权限收紧；`docker compose down -v` 会销毁账号池。
-- 建议：上线前更换默认 `WarpPass2026`；`.env` 不入库；清单文件 `0640`。
+- 建议：上线前更换默认 `$SOCKS_PASS`；`.env` 不入库；清单文件 `0640`。
 - 临时联调（如 bore 中继）会绕开节点防火墙白名单，只保留 SOCKS5 账密；仅用于测试，不要用于正式流量。
 
 ---
@@ -410,7 +410,7 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 ```bash
 # 逐端口抽样
 for p in 1081 1088 1096; do
-  curl -sS -m 10 --socks5-hostname "warpuser:WarpPass2026@NODE_PUBLIC_IP:$p" \
+  curl -sS -m 10 --socks5-hostname "warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:$p" \
     https://opencode.ai/cdn-cgi/trace | grep -E '^(ip|loc)='
 done
 ```
@@ -440,7 +440,7 @@ done
 | 1095 | bore.pub:40015 | `2a09:bac5:b1b9:4aa` |
 | 1096 | bore.pub:40016 | `2a09:bac5:b1b8:26be` |
 
-- 认证：`warpuser` / `WarpPass2026`。
+- 认证：`warpuser` / `$SOCKS_PASS`。
 - 全部 16 个入口已实测返回 `2a09:*`、`loc=US`，且 `/64` 两两不同。
 - **临时性**：bore.pub 是公共中继，沙箱销毁或 bore 进程退出即失效；正式节点请用 `NODE_PUBLIC_IP:1081..1096` + 防火墙白名单。
 
@@ -488,7 +488,7 @@ done
 | `EXTERNAL_HOST` | 自动探测 | 写入清单的公网 IPv4，建议显式设置 |
 | `START_PORT` | `1081` | 首个 SOCKS5 端口 |
 | `POOL_SIZE` / `INSTANCE_COUNT` | `16` | 实例数 |
-| `SOCKS_USER` / `SOCKS_PASS` | `warpuser` / `WarpPass2026` | SOCKS5 账密 |
+| `SOCKS_USER` / `SOCKS_PASS` | `warpuser` / `$SOCKS_PASS` | SOCKS5 账密 |
 | `REROLL_INTERVAL` | `900` | 全量换血周期（秒） |
 | `REROLL_BATCH` | `4` | 每批换血实例数 |
 | `DEDUP_RETRIES` | `4` | 单端口去重最大重试 |
@@ -565,7 +565,7 @@ done
 
    ```bash
    for p in 1081 1088 1096; do
-     curl -sS -m 10 --socks5-hostname "warpuser:WarpPass2026@NODE_PUBLIC_IP:$p" \
+     curl -sS -m 10 --socks5-hostname "warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:$p" \
        https://opencode.ai/cdn-cgi/trace | grep -E '^(ip|loc)='
    done
    ```

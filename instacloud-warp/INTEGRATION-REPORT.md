@@ -13,7 +13,7 @@
 本项目在**异国 Linux 节点**上批量生产 WARP 隧道，把出口约束为**纯 IPv6 `/64`**，以**带账密认证的 SOCKS5** 暴露给中心三台网关容器，作为 opencode2api 的上游出口池。
 
 - 单节点产出：**16 条独立 /64 出口**，端口 `1081–1096`
-- SOCKS5 认证：`warpuser` / `WarpPass2026`
+- SOCKS5 认证：`warpuser` / `$SOCKS_PASS`
 - 换血周期：`900s`（对齐网关 `limitedUntil` 15 分钟硬冷却）
 - 红线：不改 opencode2api 任何代码；不产生 IPv4 出口；不与存量 SIN/IAD/FRA 的 `/48` 家族重叠
 
@@ -31,7 +31,7 @@
 └──────────────────────────────────────┘
 ```
 
-网关只会看到一行 `socks5://warpuser:WarpPass2026@NODE_IP:PORT`，每个端口背后是**不同 WARP 账号 + 不同 /64 出口**。节点本身不需要 IPv6、不需要 TUN、不需要 `--privileged`。
+网关只会看到一行 `socks5://warpuser:$SOCKS_PASS@NODE_IP:PORT`，每个端口背后是**不同 WARP 账号 + 不同 /64 出口**。节点本身不需要 IPv6、不需要 TUN、不需要 `--privileged`。
 
 ---
 
@@ -67,7 +67,7 @@ instacloud-warp/
 Cloudflare 对 `wgcf register` 有源 IP 限速（实测观察约 **2–3 次 / 10 分钟**，不同节点有差异）。16 个账号若都直连注册，必然 429。
 
 - `n01`：容器原生网络直连注册。
-- `n02+`：`HTTPS_PROXY=socks5h://warpuser:WarpPass2026@127.0.0.1:<LAST_WORKING_PORT>`，借用**前一条已探活隧道**的 `/64` 出口去注册，等价于每个账号来自不同源地址。
+- `n02+`：`HTTPS_PROXY=socks5h://warpuser:$SOCKS_PASS@127.0.0.1:<LAST_WORKING_PORT>`，借用**前一条已探活隧道**的 `/64` 出口去注册，等价于每个账号来自不同源地址。
 - **补丁原因**：wgcf 的 uTLS 传输自己 dial，原生不认 `HTTPS_PROXY`。`patches/wgcf-socks5-proxy.patch` 仅用标准库实现 SOCKS5 握手：TCP 先经 SOCKS5 到 `api.cloudflareclient.com`，uTLS 指纹握手仍端到端直达 Cloudflare，不引入 `golang.org/x/net`。
 - 失败处理：删除损坏的 `wgcf-account.toml` → 等 15s 重试 → 链式连续两败回退直连（`REGISTER_RETRIES=3`）。
 - 账号持久化在 `/data/instances/nXX/`，重启复用不重复注册。
@@ -116,9 +116,9 @@ Cloudflare 对 `wgcf register` 有源 IP 限速（实测观察约 **2–3 次 / 
 ### 4.1 清单格式（硬性，不可协商）
 
 ```
-socks5://warpuser:WarpPass2026@NODE_PUBLIC_IP:1081
+socks5://warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1081
 ...
-socks5://warpuser:WarpPass2026@NODE_PUBLIC_IP:1096
+socks5://warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1096
 ```
 
 - 每行严格 `socks5://USER:PASS@IP:PORT`，共 16 行（= `POOL_SIZE`）。
@@ -149,7 +149,7 @@ socks5://warpuser:WarpPass2026@NODE_PUBLIC_IP:1096
 在任一中心容器内：
 
 ```bash
-curl -sS -m 10 --socks5-hostname 'warpuser:WarpPass2026@NODE_PUBLIC_IP:1081' \
+curl -sS -m 10 --socks5-hostname 'warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1081' \
   https://opencode.ai/cdn-cgi/trace
 ```
 
@@ -287,7 +287,7 @@ bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
 | `EXTERNAL_HOST` | 自动探测 | 写入清单的节点公网 IPv4（建议显式设置） |
 | `START_PORT` | `1081` | 首个 SOCKS5 端口 |
 | `POOL_SIZE` / `INSTANCE_COUNT` | `16` | 实例数（两变量等价） |
-| `SOCKS_USER` / `SOCKS_PASS` | `warpuser` / `WarpPass2026` | SOCKS5 账密 |
+| `SOCKS_USER` / `SOCKS_PASS` | `warpuser` / `$SOCKS_PASS` | SOCKS5 账密 |
 | `REROLL_INTERVAL` | `900` | 全量换血周期（秒） |
 | `REROLL_BATCH` | `4` | 换血每批实例数 |
 | `DEDUP_RETRIES` | `4` | 单端口去重最大重试 |
