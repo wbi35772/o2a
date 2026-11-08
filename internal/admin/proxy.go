@@ -27,12 +27,38 @@ import (
 // providers, the cached node manifest with its last test results, and the
 // operator settings. It lives in <state dir>/proxycenter/state.json.
 type ProxyStore struct {
-	Providers []ProxyProvider `json:"providers"`
-	CFSources []CFSource      `json:"cf_sources,omitempty"`
-	Nodes     []ProxyNode     `json:"nodes"`
-	Settings  ProxySettings   `json:"settings"`
-	SyncedAt  string          `json:"synced_at,omitempty"`
-	SyncError string          `json:"last_sync_error,omitempty"`
+	Providers        []ProxyProvider `json:"providers"`
+	CFSources        []CFSource      `json:"cf_sources,omitempty"`
+	Pools            []StaticPool    `json:"pools"`
+	PoolsInitialized bool            `json:"pools_initialized,omitempty"`
+	PoolSync         PoolSyncState   `json:"pool_sync,omitempty"`
+	Nodes            []ProxyNode     `json:"nodes"`
+	Settings         ProxySettings   `json:"settings"`
+	SyncedAt         string          `json:"synced_at,omitempty"`
+	SyncError        string          `json:"last_sync_error,omitempty"`
+}
+
+// StaticPool is one external SOCKS pool control plane. The proxy center stores
+// its API address and token, pulls the endpoint list into the gateway's
+// proxyfile, and exposes the pool's own status and tuning controls.
+type StaticPool struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	APIURL        string `json:"api_url"`
+	Token         string `json:"token,omitempty"`
+	TokenSet      bool   `json:"token_set,omitempty"`
+	Scope         string `json:"scope"`
+	Enabled       bool   `json:"enabled"`
+	EndpointCount int    `json:"endpoint_count,omitempty"`
+	LastSync      string `json:"last_sync,omitempty"`
+	LastError     string `json:"last_error,omitempty"`
+}
+
+// PoolSyncState is the last static-pool sync result shown on the pool tab.
+type PoolSyncState struct {
+	SyncedAt  string `json:"synced_at,omitempty"`
+	Endpoints int    `json:"endpoints,omitempty"`
+	Error     string `json:"last_error,omitempty"`
 }
 
 // ProxyProvider is one subscription source: an http(s) Clash/plain
@@ -438,6 +464,8 @@ func (a *Server) handleProxyState(w http.ResponseWriter, _ *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"providers":  store.Providers,
 		"cf_sources": store.CFSources,
+		"pools":      maskPoolSecrets(store.Pools),
+		"pool_sync":  store.PoolSync,
 		"settings":   store.Settings,
 		"runtime":    a.proxyRuntime(store),
 		"job":        job,

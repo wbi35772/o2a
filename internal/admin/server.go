@@ -57,11 +57,13 @@ type Server struct {
 // New returns a Server for manager, reporting to monitor and logs. stateDir is
 // the directory of config.json, where the proxy center stores its state.
 func New(manager *gateway.RuntimeController, monitor *telemetry.Metrics, logs *telemetry.LogBroker, logger *slog.Logger, stateDir string, samePort bool) *Server {
-	return &Server{
+	server := &Server{
 		manager: manager, monitor: monitor, logs: logs, logger: logger, sessions: make(map[string]adminSession),
 		attempts: make(map[string]loginWindow), debugAttempts: make(map[string]loginWindow),
 		sensitiveAttempts: make(map[string]loginWindow), stateDir: stateDir, samePort: samePort,
 	}
+	server.seedPoolsFromEnv()
+	return server
 }
 
 // Handler returns the management routes: the API under /api/ and the embedded
@@ -117,6 +119,15 @@ func (a *Server) Handler() http.Handler {
 	mux.Handle("POST /api/proxy/cf/{id}/build", a.authenticate(a.csrf(http.HandlerFunc(a.handleCFSourceBuild))))
 	mux.Handle("POST /api/proxy/cf/{id}/scan", a.authenticate(a.csrf(http.HandlerFunc(a.handleCFSourceScan))))
 	mux.Handle("POST /api/proxy/egress", a.authenticate(a.csrf(http.HandlerFunc(a.handleProxyEgress))))
+	mux.Handle("GET /api/proxy/pools", a.authenticate(http.HandlerFunc(a.handlePoolList)))
+	mux.Handle("PUT /api/proxy/pools", a.authenticate(a.csrf(http.HandlerFunc(a.handlePoolSave))))
+	mux.Handle("GET /api/proxy/pools/status", a.authenticate(http.HandlerFunc(a.handlePoolStatus)))
+	mux.Handle("POST /api/proxy/pools/sync", a.authenticate(a.csrf(http.HandlerFunc(a.handlePoolSync))))
+	mux.Handle("PUT /api/proxy/pools/{id}/config", a.authenticate(a.csrf(http.HandlerFunc(a.handlePoolConfig))))
+	mux.Handle("POST /api/proxy/pools/{id}/reroll", a.authenticate(a.csrf(http.HandlerFunc(a.handlePoolReroll))))
+	mux.Handle("POST /api/proxy/pools/{id}/nodes/{user}/{action}", a.authenticate(a.csrf(http.HandlerFunc(a.handlePoolNode))))
+	mux.Handle("GET /api/proxy/pools/{id}/endpoints", a.authenticate(http.HandlerFunc(a.handlePoolEndpoints)))
+	mux.Handle("GET /api/proxy/pools/{id}/logs", a.authenticate(http.HandlerFunc(a.handlePoolLogs)))
 	mux.Handle("/", a.staticHandler())
 	return a.securityHeaders(telemetry.Recover(a.logger, mux))
 }

@@ -10,11 +10,14 @@
 #
 # Environment:
 #   POOL_API_URL        base URL of the pool control plane, e.g.
-#                       http://POOL_PRIVATE_HOST:1081
-#   POOL_API_TOKEN      bearer token for /api/v1/*
+#                       http://POOL_PRIVATE_HOST:1081 (legacy single pool,
+#                       used only when POOL_STATE_FILE has no pools list)
+#   POOL_API_TOKEN      bearer token for /api/v1/* (legacy single pool)
+#   POOL_STATE_FILE     proxy center state with the managed pool list
+#                       (default: $STATE_DIR/proxycenter/state.json)
 #   POOL_ENV_FILE       optional env file sourced before the above
 #                       (default: $STATE_DIR/upgrade/pool.env)
-#   POOL_SYNC_SCOPE     private | public (default: private)
+#   POOL_SYNC_SCOPE     private | public (default: private, legacy only)
 #   EGRESS_FILE         list written for the gateway
 #                       (default: $STATE_DIR/egress-ext.txt)
 #   ADMIN_API           local gateway base URL (default: http://127.0.0.1:8081)
@@ -30,6 +33,7 @@ set -u
 
 BASE="${STATE_DIR:-/var/lib/opencode2api}"
 ENVF="${POOL_ENV_FILE:-$BASE/upgrade/pool.env}"
+POOL_STATE_FILE="${POOL_STATE_FILE:-$BASE/proxycenter/state.json}"
 EGRESS="${EGRESS_FILE:-$BASE/egress-ext.txt}"
 LOG="${POOL_SYNC_LOG:-$BASE/upgrade/pool-sync.log}"
 LOCK="${POOL_SYNC_LOCK:-/tmp/pool-sync.lock}"
@@ -65,25 +69,91 @@ log() { echo "$(date -u +%FT%TZ) $*" >>"$LOG" 2>/dev/null || true; }
 
 [ -f "$ENVF" ] && . "$ENVF"
 
-fetch_once() {
-  if [ -z "${POOL_API_URL:-}" ]; then
-    log "POOL_API_URL not set; sync skipped"
-    return 0
-  fi
+# pools_from_state prints "id<TAB>api_url<TAB>token<TAB>scope" for every
+# enabled pool the proxy center manages. Exit 0 means the state file is
+# authoritative (even when the list is empty); exit 1 means fall back to the
+# legacy POOL_API_URL environment.
+pools_from_state() {
+  [ -f "$POOL_STATE_FILE" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  initialized=$(jq -r '.pools_initialized // false' "$POOL_STATE_FILE" 2>/dev/null) || return 1
+  [ "$initialized" = "true" ] || return 1
+  jq -r '.pools[]? | select(.enabled == true) |
+    [(.id // ""), (.api_url // ""), (.token // ""), (.scope // "private")] | @tsv' \
+    "$POOL_STATE_FILE" 2>/dev/null
+}
 
-  tmp="$EGRESS.tmp.$$"
+fetch_pool() {
+  # fetch_pool URL TOKEN SCOPE OUTFILE -> curl http status code
+  url=$1
+  token=$2
+  scope=$3
+  out=$4
+  case "$scope" in
+    public) : ;;
+    *) scope=private ;;
+  esac
   code=$(curl -sS -m "$POOL_HTTP_TIMEOUT" \
-    -H "Authorization: Bearer ${POOL_API_TOKEN:-}" \
-    -o "$tmp" -w '%{http_code}' \
-    "$POOL_API_URL/api/v1/endpoints?scope=${POOL_SYNC_SCOPE}" 2>/dev/null || echo 000)
-  if [ "$code" != "200" ] || [ ! -s "$tmp" ]; then
-    size=$(wc -c <"$tmp" 2>/dev/null || echo 0)
-    log "fetch failed http=$code size=$size; keeping current list"
-    rm -f "$tmp"
-    return 1
+    -H "Authorization: Bearer ${token:-}" \
+    -o "$out" -w '%{http_code}' \
+    "$url/api/v1/endpoints?scope=$scope" 2>/dev/null) || code=000
+  printf '%s' "$code"
+}
+
+fetch_once() {
+  tmp="$EGRESS.tmp.$$"
+  merged="$EGRESS.merge.$$"
+  list="$EGRESS.pools.$$"
+  : >"$merged"
+
+  if pools_from_state >"$list"; then
+    enabled=0
+    succeeded=0
+    tab=$(printf '\t')
+    while IFS="$tab" read -r pid api token scope; do
+      [ -n "$api" ] || continue
+      enabled=$((enabled + 1))
+      part="$EGRESS.part.$$.$enabled"
+      code=$(fetch_pool "$api" "$token" "$scope" "$part")
+      if [ "$code" = "200" ] && [ -s "$part" ] && grep -q '^socks5://' "$part" 2>/dev/null; then
+        succeeded=$((succeeded + 1))
+        cat "$part" >>"$merged"
+        log "pool $pid fetched http=200 endpoints=$(grep -c '^socks5://' "$part" 2>/dev/null || echo 0)"
+      else
+        log "pool $pid fetch failed http=$code; skipped"
+      fi
+      rm -f "$part"
+    done <"$list"
+    rm -f "$list"
+    if [ "$enabled" -eq 0 ]; then
+      log "no enabled pools in state; sync skipped"
+      rm -f "$tmp" "$merged"
+      return 0
+    fi
+    if [ "$succeeded" -eq 0 ]; then
+      log "all $enabled pools failed; keeping current list"
+      rm -f "$tmp" "$merged"
+      return 1
+    fi
+  else
+    rm -f "$list"
+    if [ -z "${POOL_API_URL:-}" ]; then
+      log "POOL_API_URL not set; sync skipped"
+      rm -f "$tmp" "$merged"
+      return 0
+    fi
+    code=$(fetch_pool "$POOL_API_URL" "${POOL_API_TOKEN:-}" "$POOL_SYNC_SCOPE" "$merged")
+    if [ "$code" != "200" ] || [ ! -s "$merged" ]; then
+      size=$(wc -c <"$merged" 2>/dev/null || echo 0)
+      log "fetch failed http=$code size=$size; keeping current list"
+      rm -f "$tmp" "$merged"
+      return 1
+    fi
   fi
 
+  grep '^socks5://' "$merged" 2>/dev/null | awk '!seen[$0]++' >"$tmp" || true
   n=$(grep -c '^socks5://' "$tmp" 2>/dev/null || true)
+  rm -f "$merged"
   if [ "${n:-0}" -eq 0 ]; then
     log "fetch returned no socks5:// lines; keeping current list"
     rm -f "$tmp"
@@ -152,15 +222,15 @@ run_once() {
   fetch_once
   rc=$?
   case "$MODE" in
-    fetch) return 0 ;;
+    fetch) return "$rc" ;;
     *) [ "$rc" = "2" ] && reload_gateway ;;
   esac
-  return 0
+  return "$rc"
 }
 
 
 if [ "$MODE" = "loop" ]; then
-  log "pool sync loop started: interval=${LOOP_INTERVAL}s scope=${POOL_SYNC_SCOPE} url=${POOL_API_URL:-unset}"
+  log "pool sync loop started: interval=${LOOP_INTERVAL}s state=${POOL_STATE_FILE} legacy_url=${POOL_API_URL:-unset}"
   while :; do
     run_once
     sleep "$LOOP_INTERVAL"

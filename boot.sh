@@ -23,8 +23,8 @@
 #   ADMIN_USER           default admin
 #   ADMIN_PASS / ADMIN_PASS_FILE
 #   POOL_SYNC_ENABLE     1 = run pool sync (default: 1)
-#   POOL_SYNC_BIN        default: $STATE_DIR/upgrade/pool-sync.sh if present,
-#                        otherwise /usr/local/bin/pool-sync.sh
+#   POOL_SYNC_BIN        default: /usr/local/bin/pool-sync.sh if present,
+#                        otherwise $STATE_DIR/upgrade/pool-sync.sh
 #   POOL_SYNC_INTERVAL   default 60
 #   POOL_ENV_FILE / POOL_API_URL / POOL_API_TOKEN / EGRESS_FILE ...
 #                        passed through to pool-sync.sh
@@ -62,10 +62,10 @@ fi
 command -v jq >/dev/null 2>&1 || { log "FATAL jq not found"; exit 1; }
 
 if [ -z "${POOL_SYNC_BIN:-}" ]; then
-  if [ -x "$BASE/upgrade/pool-sync.sh" ]; then
-    POOL_SYNC_BIN="$BASE/upgrade/pool-sync.sh"
-  else
+  if [ -x /usr/local/bin/pool-sync.sh ]; then
     POOL_SYNC_BIN=/usr/local/bin/pool-sync.sh
+  else
+    POOL_SYNC_BIN="$BASE/upgrade/pool-sync.sh"
   fi
 fi
 

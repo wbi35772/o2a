@@ -872,6 +872,7 @@
                 <button class="tab active" type="button" data-proxy-tab="nodes" role="tab" aria-selected="true" data-i18n="proxy.tab.nodes">节点与出口</button>
                 <button class="tab" type="button" data-proxy-tab="cf" role="tab" aria-selected="false" data-i18n="proxy.tab.cf">Cloudflare 出口</button>
                 <button class="tab" type="button" data-proxy-tab="providers" role="tab" aria-selected="false" data-i18n="proxy.tab.providers">订阅</button>
+                <button class="tab" type="button" data-proxy-tab="pools" role="tab" aria-selected="false" data-i18n="proxy.tab.pools">静态池</button>
                 <button class="tab" type="button" data-proxy-tab="settings" role="tab" aria-selected="false" data-i18n="proxy.tab.settings">设置</button>
                 <button class="tab" type="button" data-proxy-tab="logs" role="tab" aria-selected="false" data-i18n="proxy.tab.logs">日志</button>
               </div>
@@ -1029,6 +1030,120 @@
                     </thead>
                     <tbody id="proxy-providers"></tbody>
                   </table>
+                </div>
+              </div>
+
+              <div data-proxy-panel="pools" class="stack hidden" role="tabpanel">
+                <div id="pool-cards" class="facts"></div>
+                <div class="actions">
+                  <button id="pool-sync-now" type="button" class="btn btn-sm btn-primary">立即同步</button>
+                  <button id="pool-add" type="button" class="btn btn-sm">新增池</button>
+                  <button id="pool-refresh-status" type="button" class="btn btn-sm">刷新池状态</button>
+                </div>
+                <p id="pool-status" class="section-caption" role="status"></p>
+                <div class="table-wrap">
+                  <table class="table">
+                    <thead>
+                      <tr>
+                        <th>名称</th>
+                        <th>API 地址</th>
+                        <th>范围</th>
+                        <th class="num">端点</th>
+                        <th>最近同步</th>
+                        <th>错误</th>
+                        <th class="num">启用</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="pool-list"></tbody>
+                  </table>
+                </div>
+                <p class="section-caption">
+                  池列表保存在代理中心状态里。同步时会把所有启用池的端点合并去重，写入网关的 proxyfile，然后热重载；池里扩容节点只需在池侧增加节点数，再点「立即同步」。
+                </p>
+
+                <div id="pool-editor" class="stack hidden">
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="pool-name">名称</label>
+                      <input id="pool-name" placeholder="eu-central 池" />
+                    </div>
+                    <div class="field">
+                      <label for="pool-scope">端点范围</label>
+                      <select id="pool-scope">
+                        <option value="private">内网（private）</option>
+                        <option value="public">公网（public）</option>
+                      </select>
+                    </div>
+                    <div class="field full">
+                      <label for="pool-api">API 地址</label>
+                      <input id="pool-api" placeholder="http://warp-pool.insta.internal:1081" />
+                    </div>
+                    <div class="field full">
+                      <label for="pool-token">API Token（留空保持不变）</label>
+                      <input id="pool-token" type="password" autocomplete="new-password" placeholder="Bearer token" />
+                    </div>
+                  </div>
+                  <label class="check">
+                    <input id="pool-enabled" type="checkbox" checked />
+                    <span>启用（同步时拉取这个池的端点）</span>
+                  </label>
+                  <div class="actions">
+                    <button id="pool-save" type="button" class="btn btn-sm btn-primary">保存池</button>
+                    <button id="pool-cancel" type="button" class="btn btn-sm">取消</button>
+                  </div>
+                </div>
+
+                <div id="pool-detail" class="stack hidden">
+                  <div class="section-head">
+                    <h2 id="pool-detail-title" class="section-title">池状态</h2>
+                    <div class="actions">
+                      <button id="pool-reroll" type="button" class="btn btn-sm">全部轮换</button>
+                      <button id="pool-logs-refresh" type="button" class="btn btn-sm">刷新池日志</button>
+                      <button id="pool-detail-close" type="button" class="btn btn-sm">关闭</button>
+                    </div>
+                  </div>
+                  <div id="pool-facts" class="facts"></div>
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="pool-rotation">轮换间隔（秒）</label>
+                      <input id="pool-rotation" type="number" min="60" max="86400" />
+                    </div>
+                    <div class="field">
+                      <label for="pool-batch">每轮轮换数</label>
+                      <input id="pool-batch" type="number" min="1" />
+                    </div>
+                    <div class="field">
+                      <label for="pool-health">健康检查间隔（秒）</label>
+                      <input id="pool-health" type="number" min="30" max="86400" />
+                    </div>
+                    <div class="field">
+                      <label for="pool-min-healthy">最小健康数</label>
+                      <input id="pool-min-healthy" type="number" min="0" />
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button id="pool-tune-save" type="button" class="btn btn-sm btn-primary">保存参数</button>
+                  </div>
+                  <div class="table-wrap">
+                    <table class="table">
+                      <thead>
+                        <tr>
+                          <th>节点</th>
+                          <th class="num">端口</th>
+                          <th>状态</th>
+                          <th class="num">健康</th>
+                          <th class="num">启用</th>
+                          <th>出口</th>
+                          <th>位置</th>
+                          <th class="num">连接</th>
+                          <th>操作</th>
+                        </tr>
+                      </thead>
+                      <tbody id="pool-nodes"></tbody>
+                    </table>
+                  </div>
+                  <pre id="pool-logs" class="logs"></pre>
                 </div>
               </div>
 

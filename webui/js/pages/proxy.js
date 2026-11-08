@@ -18,6 +18,14 @@ const state = {
   cfEditing: "",
   egressPick: null,
   health: null,
+  pools: [],
+  poolSync: null,
+  poolStatus: {},
+  poolEditing: "",
+  poolDetail: "",
+  poolEgressLines: 0,
+  poolEgressFile: "",
+  poolTimer: null,
 };
 
 const statusText = () => ({
@@ -282,6 +290,335 @@ function renderProviders() {
   if (!providers.length) emptyRow(body, 8, t("还没有订阅", "proxy.noProviders"));
 }
 
+function poolLive(pool) {
+  const view = state.poolStatus[pool.id];
+  return view?.ok ? view.status?.pool || null : null;
+}
+
+function renderPoolCards() {
+  const host = $("#pool-cards");
+  if (!host) return;
+  host.replaceChildren();
+  const pools = state.pools || [];
+  const enabled = pools.filter((pool) => pool.enabled).length;
+  const sync = state.poolSync || {};
+  const healthy = pools.reduce((sum, pool) => sum + (poolLive(pool)?.healthy || 0), 0);
+  const nodes = pools.reduce((sum, pool) => sum + (poolLive(pool)?.count || 0), 0);
+  host.append(
+    fact("静态池", pools.length),
+    fact("启用池", enabled),
+    fact("池节点（健康 / 总数）", nodes ? `${healthy} / ${nodes}` : "—"),
+    fact("端点文件行数", state.poolEgressLines ?? 0),
+    fact("上次同步", sync.synced_at ? localTime(sync.synced_at) : "—"),
+  );
+  const status = $("#pool-status");
+  if (!status) return;
+  if (sync.last_error) status.textContent = `上次同步失败：${sync.last_error}`;
+  else if (sync.synced_at) status.textContent = `已同步 ${sync.endpoints ?? 0} 个端点 · ${state.poolEgressFile || ""}`;
+  else status.textContent = "还没同步过；点「立即同步」拉取所有启用池的端点并热重载网关。";
+}
+
+function renderPoolList() {
+  const body = $("#pool-list");
+  if (!body) return;
+  body.replaceChildren();
+  const pools = state.pools || [];
+  for (const pool of pools) {
+    const toggle = el("input", { type: "checkbox", checked: pool.enabled });
+    toggle.addEventListener("change", async () => {
+      pool.enabled = toggle.checked;
+      await savePools();
+    });
+    const status = el("button", { type: "button", class: "btn btn-sm btn-ghost", text: "状态/调参" });
+    status.addEventListener("click", () => openPoolDetail(pool.id));
+    const edit = el("button", { type: "button", class: "btn btn-sm btn-ghost", text: t("编辑", "common.edit") });
+    edit.addEventListener("click", () => fillPoolForm(pool));
+    const remove = el("button", { type: "button", class: "btn btn-sm btn-ghost", text: t("删除", "common.delete") });
+    remove.addEventListener("click", async () => {
+      if (!confirm(`删除静态池「${pool.name}」？端点列表要重新同步才会移除。`)) return;
+      state.pools = pools.filter((item) => item.id !== pool.id);
+      if (state.poolEditing === pool.id) resetPoolForm();
+      if (state.poolDetail === pool.id) {
+        state.poolDetail = "";
+        $("#pool-detail").classList.add("hidden");
+      }
+      await savePools();
+    });
+    const live = poolLive(pool);
+    body.append(
+      el("tr", {}, [
+        el("td", { text: pool.name }),
+        el("td", { class: "mono proxy-url", text: pool.api_url }),
+        el("td", { text: pool.scope }),
+        el("td", {
+          class: "num",
+          text: String(live?.count ?? pool.endpoint_count ?? 0),
+          title: live ? `健康 ${live.healthy ?? 0} / 启用 ${live.enabled ?? 0}` : "",
+        }),
+        el("td", { text: pool.last_sync ? localTime(pool.last_sync) : "—" }),
+        el("td", { text: pool.last_error || "—" }),
+        el("td", { class: "num" }, [toggle]),
+        el("td", {}, [status, edit, remove]),
+      ]),
+    );
+  }
+  if (!pools.length) emptyRow(body, 8, "还没有静态池，点「新增池」添加。");
+}
+
+function fillPoolForm(pool) {
+  state.poolEditing = pool.id || "";
+  $("#pool-name").value = pool.name || "";
+  $("#pool-api").value = pool.api_url || "";
+  $("#pool-scope").value = pool.scope || "private";
+  $("#pool-token").value = "";
+  $("#pool-token").placeholder = pool.token_set ? "已保存，留空保持不变" : "Bearer token";
+  $("#pool-enabled").checked = pool.enabled !== false;
+  $("#pool-editor").classList.remove("hidden");
+}
+
+function resetPoolForm() {
+  state.poolEditing = "";
+  $("#pool-name").value = "";
+  $("#pool-api").value = "";
+  $("#pool-scope").value = "private";
+  $("#pool-token").value = "";
+  $("#pool-token").placeholder = "Bearer token";
+  $("#pool-enabled").checked = true;
+  $("#pool-editor").classList.add("hidden");
+}
+
+async function savePools(pools = state.pools) {
+  try {
+    const result = await api("/api/proxy/pools", {
+      method: "PUT",
+      body: JSON.stringify({ pools }),
+    });
+    state.pools = result.pools || [];
+    renderPoolCards();
+    renderPoolList();
+    toast("池配置已保存", false);
+    return true;
+  } catch (error) {
+    toast(error.message, true);
+    await loadPools();
+    return false;
+  }
+}
+
+async function savePoolForm() {
+  const name = $("#pool-name").value.trim();
+  const apiURL = $("#pool-api").value.trim();
+  if (!name || !apiURL) {
+    toast("名称和 API 地址都要填", true);
+    return;
+  }
+  const pool = {
+    id: state.poolEditing,
+    name,
+    api_url: apiURL,
+    scope: $("#pool-scope").value,
+    enabled: $("#pool-enabled").checked,
+  };
+  const token = $("#pool-token").value.trim();
+  if (token) pool.token = token;
+  const pools = [...(state.pools || [])];
+  const index = pools.findIndex((item) => item.id === state.poolEditing);
+  if (index >= 0) pools[index] = { ...pools[index], ...pool };
+  else pools.push(pool);
+  if (await savePools(pools)) resetPoolForm();
+}
+
+async function loadPools() {
+  const result = await api("/api/proxy/pools");
+  if (!hasSession()) return;
+  state.pools = result.pools || [];
+  state.poolSync = result.pool_sync || {};
+  state.poolEgressLines = result.egress_lines ?? 0;
+  state.poolEgressFile = result.egress_file || "";
+  renderPoolCards();
+  renderPoolList();
+}
+
+async function loadPoolStatus() {
+  const result = await api("/api/proxy/pools/status");
+  if (!hasSession()) return;
+  state.poolStatus = {};
+  for (const view of result.pools || []) state.poolStatus[view.id] = view;
+  state.poolEgressLines = result.egress_lines ?? state.poolEgressLines;
+  renderPoolCards();
+  renderPoolList();
+  if (state.poolDetail) renderPoolDetail();
+}
+
+async function openPoolDetail(id) {
+  state.poolDetail = id;
+  $("#pool-detail").classList.remove("hidden");
+  renderPoolDetail();
+  try {
+    await loadPoolStatus();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function renderPoolDetail() {
+  const pool = (state.pools || []).find((item) => item.id === state.poolDetail);
+  if (!pool) {
+    $("#pool-detail").classList.add("hidden");
+    return;
+  }
+  $("#pool-detail-title").textContent = `池状态 · ${pool.name}`;
+  const view = state.poolStatus[pool.id];
+  const data = view?.status;
+  const summary = data?.pool;
+  const host = $("#pool-facts");
+  host.replaceChildren();
+  if (!view) {
+    host.append(fact("状态", "加载中…"));
+  } else if (!view.ok) {
+    host.append(fact("状态", "连接失败"), fact("错误", view.error || "—"));
+  } else if (summary) {
+    host.append(
+      fact("节点规模（健康 / 总数）", `${summary.healthy ?? 0} / ${summary.count ?? 0}`),
+      fact("启用节点", summary.enabled ?? "—"),
+      fact("轮换间隔", `${summary.rotation_interval_seconds ?? "—"} 秒`),
+      fact("每轮轮换", summary.reroll_batch ?? "—"),
+      fact("健康检查", `${summary.health_interval_seconds ?? "—"} 秒`),
+      fact("最小健康数", summary.min_healthy ?? "—"),
+      fact("mux 端口", summary.mux_port ?? "—"),
+      fact("内网地址", summary.private_host || "—"),
+      fact("公网地址", summary.public_host || "—"),
+      fact("SOCKS 用户", summary.socks_user || "—"),
+    );
+    $("#pool-rotation").value = summary.rotation_interval_seconds ?? "";
+    $("#pool-batch").value = summary.reroll_batch ?? "";
+    $("#pool-health").value = summary.health_interval_seconds ?? "";
+    $("#pool-min-healthy").value = summary.min_healthy ?? "";
+  }
+  renderPoolNodes(data?.nodes || [], view);
+}
+
+function renderPoolNodes(nodes, view) {
+  const body = $("#pool-nodes");
+  body.replaceChildren();
+  if (!view?.ok) {
+    emptyRow(body, 9, view?.error || "池未连接");
+    return;
+  }
+  for (const node of nodes) {
+    const rotate = el("button", { type: "button", class: "btn btn-sm btn-ghost", text: "轮换" });
+    rotate.addEventListener("click", () => poolNodeAction(node.user, "rotate", rotate));
+    const toggle = el("button", {
+      type: "button",
+      class: "btn btn-sm btn-ghost",
+      text: node.enabled ? "停用" : "启用",
+    });
+    toggle.addEventListener("click", () => poolNodeAction(node.user, node.enabled ? "disable" : "enable", toggle));
+    body.append(
+      el("tr", {}, [
+        el("td", { class: "mono", text: node.user }),
+        el("td", { class: "num", text: String(node.port ?? "—") }),
+        el("td", { text: node.state || "unknown" }),
+        el("td", { class: "num", text: node.healthy ? "是" : "否" }),
+        el("td", { class: "num", text: node.enabled ? "是" : "否" }),
+        el("td", { class: "mono", text: node.exit_ipv6 || node.prefix64 || "—" }),
+        el("td", { text: node.loc || "—" }),
+        el("td", { class: "num", text: String(node.connections ?? 0) }),
+        el("td", {}, [rotate, toggle]),
+      ]),
+    );
+  }
+  if (!nodes.length) emptyRow(body, 9, "池里还没有节点");
+}
+
+async function poolNodeAction(user, action, button) {
+  button.disabled = true;
+  try {
+    await api(`/api/proxy/pools/${encodeURIComponent(state.poolDetail)}/nodes/${encodeURIComponent(user)}/${action}`, {
+      method: "POST",
+      body: "{}",
+    });
+    toast(`已提交 ${user} ${action}`, false);
+    await loadPoolStatus();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function savePoolTuning() {
+  const payload = {
+    rotation_interval_seconds: Number($("#pool-rotation").value),
+    reroll_batch: Number($("#pool-batch").value),
+    health_interval_seconds: Number($("#pool-health").value),
+    min_healthy: Number($("#pool-min-healthy").value),
+  };
+  if (Object.values(payload).some((value) => !Number.isFinite(value))) {
+    toast("四个参数都要填数字", true);
+    return;
+  }
+  try {
+    await api(`/api/proxy/pools/${encodeURIComponent(state.poolDetail)}/config`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    toast("池参数已保存并热更新", false);
+    await loadPoolStatus();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function rerollPool() {
+  try {
+    await api(`/api/proxy/pools/${encodeURIComponent(state.poolDetail)}/reroll`, {
+      method: "POST",
+      body: "{}",
+    });
+    toast("已提交全部轮换，稍后刷新状态", false);
+    setTimeout(() => loadPoolStatus().catch(() => {}), 2000);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function loadPoolLogs() {
+  if (!state.poolDetail) return;
+  try {
+    const result = await api(`/api/proxy/pools/${encodeURIComponent(state.poolDetail)}/logs?lines=200`);
+    $("#pool-logs").textContent = (result.lines || []).join("\n") || "(空)";
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function pollPoolSync(attempt = 0) {
+  clearTimeout(state.poolTimer);
+  if (attempt > 30) return;
+  state.poolTimer = setTimeout(async () => {
+    try {
+      await loadStore();
+      await loadPools();
+      if (state.store?.job?.running) pollPoolSync(attempt + 1);
+      else await loadPoolStatus();
+    } catch {
+      pollPoolSync(attempt + 1);
+    }
+  }, 2000);
+}
+
+async function syncPoolsNow() {
+  try {
+    await api("/api/proxy/pools/sync", { method: "POST", body: "{}" });
+    toast("已开始同步静态池", false);
+    await loadPools();
+    pollPoolSync();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
 function renderSettings() {
   const settings = state.store?.settings;
   if (!settings) return;
@@ -347,7 +684,7 @@ function renderNodes() {
 
 async function refreshAll() {
   try {
-    await Promise.all([loadStore(), loadNodes(), loadHealth()]);
+    await Promise.all([loadStore(), loadNodes(), loadHealth(), loadPools()]);
   } catch (error) {
     toast(error.message, true);
   }
@@ -647,6 +984,10 @@ function showPanel(name) {
   for (const panel of document.querySelectorAll("#page-proxy [data-proxy-panel]"))
     panel.classList.toggle("hidden", panel.dataset.proxyPanel !== name);
   if (name === "logs") loadLogs();
+  if (name === "pools") {
+    loadPools().catch((error) => toast(error.message, true));
+    loadPoolStatus().catch((error) => toast(error.message, true));
+  }
 }
 
 function bind() {
@@ -670,6 +1011,36 @@ function bind() {
   $("#proxy-settings-save").addEventListener("click", saveSettings);
   $("#proxy-mode-apply").addEventListener("click", applyEgressMode);
   $("#proxy-provider-add").addEventListener("click", addProvider);
+  $("#pool-sync-now").addEventListener("click", syncPoolsNow);
+  $("#pool-add").addEventListener("click", () => {
+    resetPoolForm();
+    $("#pool-editor").classList.remove("hidden");
+    $("#pool-name").focus();
+  });
+  $("#pool-save").addEventListener("click", savePoolForm);
+  $("#pool-cancel").addEventListener("click", resetPoolForm);
+  $("#pool-refresh-status").addEventListener("click", () =>
+    loadPoolStatus().catch((error) => toast(error.message, true)),
+  );
+  $("#pool-tune-save").addEventListener("click", savePoolTuning);
+  $("#pool-reroll").addEventListener("click", rerollPool);
+  $("#pool-detail-close").addEventListener("click", () => {
+    state.poolDetail = "";
+    $("#pool-detail").classList.add("hidden");
+  });
+  $("#pool-logs-refresh").addEventListener("click", loadPoolLogs);
+  for (const id of ["pool-name", "pool-api", "pool-token"])
+    $(`#${id}`).addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      savePoolForm();
+    });
+  for (const id of ["pool-rotation", "pool-batch", "pool-health", "pool-min-healthy"])
+    $(`#${id}`).addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      savePoolTuning();
+    });
   $("#proxy-prev").addEventListener("click", () => {
     if (state.page > 1) {
       state.page -= 1;
@@ -737,5 +1108,6 @@ export default {
   },
   hide() {
     clearTimeout(state.timer);
+    clearTimeout(state.poolTimer);
   },
 };
