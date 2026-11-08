@@ -33,6 +33,7 @@ set -u
 BASE="${STATE_DIR:-/var/lib/opencode2api}"
 CFG="${CONFIG_PATH:-$BASE/config-boot.json}"
 SRC="${CONFIG_SOURCE:-$BASE/config.json}"
+[ "$CFG" = "$SRC" ] && CFG="$BASE/config-boot.json"
 BIN="${O2A_BIN:-$BASE/upgrade/opencode2api-app.new}"
 BOOTSTATE="$CFG.warp-state.json"
 STATE="$SRC.warp-state.json"

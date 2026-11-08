@@ -78,13 +78,15 @@ EXTERNAL_HOST=<public-ip>
 4. 后台跑 `pool-sync.sh --loop`；
 5. `exec` 网关二进制。
 
+镜像的 `docker-entrypoint` 检测到 `$STATE_DIR/upgrade/boot.sh` 时会自动 `exec` 它（`O2A_USE_BOOT_SH=0` 可关闭），所以仓库构建的镜像不需要平台自定义 `start_command`；卷上没有 `boot.sh` 时仍走原来的配置播种 + wrapper 路径。
+
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `STATE_DIR` | `/var/lib/opencode2api` | 数据卷 |
 | `CONFIG_SOURCE` | `$STATE_DIR/config.json` | 源配置 |
-| `CONFIG_PATH` | `$STATE_DIR/config-boot.json` | 运行时配置 |
-| `O2A_BIN` | `$STATE_DIR/upgrade/opencode2api-app.new`，回退 `/usr/local/bin/opencode2api-app` | 网关二进制 |
-| `POOL_SYNC_BIN` | 卷上 `upgrade/pool-sync.sh`，回退镜像 `/usr/local/bin/pool-sync.sh` | 同步脚本 |
+| `CONFIG_PATH` | `$STATE_DIR/config-boot.json` | 运行时配置（与 `CONFIG_SOURCE` 相同时自动改用 `config-boot.json`） |
+| `O2A_BIN` | `/usr/local/bin/opencode2api-app` | 镜像 ENV；覆盖为卷上路径可继续用旧二进制 |
+| `POOL_SYNC_BIN` | `/usr/local/bin/pool-sync.sh` | 镜像 ENV；覆盖为卷上路径可继续用旧脚本 |
 | `POOL_SYNC_ENABLE` | `1` | 关闭设 0 |
 | `WARP_ENABLE_ON_BOOT` | `1` | 关闭设 0 |
 | `O2A_WEB_SAME_PORT` | `1` | 传 `-web-same-port` |

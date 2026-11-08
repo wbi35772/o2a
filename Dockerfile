@@ -57,7 +57,9 @@ ENV CONFIG_PATH=/var/lib/opencode2api/config.json \
     CONFIG_SEED_PATH= \
     LISTEN_ADDRESS= \
     WEBUI_LISTEN_ADDRESS= \
-    STATE_DIR=/var/lib/opencode2api
+    STATE_DIR=/var/lib/opencode2api \
+    O2A_BIN=/usr/local/bin/opencode2api-app \
+    POOL_SYNC_BIN=/usr/local/bin/pool-sync.sh
 
 WORKDIR /app
 

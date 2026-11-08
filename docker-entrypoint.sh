@@ -20,6 +20,20 @@ if [ "$#" -gt 0 ]; then
     exec "$@"
 fi
 
+# InstaCloud-style deployments keep an operator-managed boot.sh on the data
+# volume. Delegate to it so a repo-built image and a volume-managed image take
+# the same startup path (WARP staged off, pool sync, then the gateway).
+boot_sh=${O2A_BOOT_SH:-$state_dir/upgrade/boot.sh}
+if [ "${O2A_USE_BOOT_SH:-1}" = "1" ] \
+    && [ -x "$boot_sh" ] \
+    && [ -z "${O2A_BOOT_SH_ACTIVE:-}" ]; then
+    export O2A_BOOT_SH_ACTIVE=1
+    # boot.sh writes its own CONFIG_PATH (a derived runtime config); the image
+    # default would otherwise make source and runtime config the same file.
+    unset CONFIG_PATH CONFIG_SEED_PATH
+    exec "$boot_sh"
+fi
+
 # The example config binds the API to loopback, which is unreachable from
 # outside a container through published ports. Rewrite only that exact default
 # while seeding; any other address is left exactly as the operator wrote it.
