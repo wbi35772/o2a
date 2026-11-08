@@ -78,7 +78,9 @@ EXTERNAL_HOST=<public-ip>
 4. 后台跑 `pool-sync.sh --loop`；
 5. `exec` 网关二进制。
 
-镜像的 `docker-entrypoint` 检测到 `$STATE_DIR/upgrade/boot.sh` 时会自动 `exec` 它（`O2A_USE_BOOT_SH=0` 可关闭），所以仓库构建的镜像不需要平台自定义 `start_command`；卷上没有 `boot.sh` 时仍走原来的配置播种 + wrapper 路径。
+镜像的 `docker-entrypoint` 检测到 `$STATE_DIR/upgrade/boot.sh` 时会自动 `exec` 它（`O2A_USE_BOOT_SH=0` 可关闭）。如果平台保留了旧的自定义 `start_command`（例如 `exec /var/lib/opencode2api/upgrade/boot.sh`），它会绕过镜像 entrypoint 并继续执行卷上的旧副本；此时必须把启动命令改成镜像路径 `exec /usr/local/bin/boot.sh`，或先把镜像里的 `boot.sh` / `pool-sync.sh` 同步到卷上。建议直接用镜像路径，仓库部署才会真正生效。
+
+卷上没有 `boot.sh` 时仍走原来的配置播种 + wrapper 路径。
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -124,9 +126,14 @@ EXTERNAL_HOST=<public-ip>
    - 首次启动后确认 `/healthz`、`/api/v1/status` 16/16。
 3. 部署主容器：
    - 卷保留 `config.json`、`egress-ext.txt`、`upgrade/`；
-   - 启动命令用 `boot.sh`（镜像 `/usr/local/bin/boot.sh`，或卷上副本）；
+   - **启动命令必须指向镜像内入口**，不要继续指向卷上的旧副本：
+     `insta compute start-command --set 'exec /usr/local/bin/boot.sh' <service> --branch <branch>`；
+     如果平台不允许自定义命令，则先把镜像里的 `boot.sh` / `pool-sync.sh` 覆盖到卷上再启动；
    - 注入 `POOL_API_URL`、`POOL_API_TOKEN`（或写 `upgrade/pool.env`）。
-4. 主容器启动后确认 `egress-ext.txt` 行数 = pool 健康节点数，`healthz` 静态池全绿。
+4. 主容器启动后确认：
+   - `ps -o args= -p 1` 显示 `/usr/local/bin/opencode2api-app ... -config .../config-boot.json`，不是卷上的 `opencode2api-app.new`；
+   - `egress-ext.txt` 行数 = pool 健康节点数，`healthz` 静态池全绿；
+   - `pool-sync.log` 无 `fetch failed`。
 
 ## 6. 验收
 
