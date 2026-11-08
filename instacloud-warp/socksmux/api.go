@@ -371,7 +371,7 @@ func (a *apiServer) handleMeta(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			endpoints = append(endpoints, line)
-			if len(endpoints) >= 256 {
+			if len(endpoints) >= 1024 {
 				break
 			}
 		}
