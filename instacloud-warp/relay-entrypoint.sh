@@ -42,6 +42,7 @@ WG_ENDPOINT_PORT="${WG_ENDPOINT_PORT:-2408}"
 RELAY_PRIVATE_HOST="${RELAY_PRIVATE_HOST:-warp-relay.insta.internal}"
 RELAY_PUBLIC_HOST="${RELAY_PUBLIC_HOST:-}"
 
+RELAY_API_TOKEN="${RELAY_API_TOKEN:-}"
 RELAY_HOST_ENV="${RELAY_HOST:-}"
 RELAY_PASSWORD_ENV="${RELAY_PASSWORD:-}"
 RELAY_PORT_ENV="${RELAY_PORT}"
@@ -74,6 +75,7 @@ apply_kv() {
     RELAY_PORT) RELAY_PORT=$2 ;;
     RELAY_SNI) RELAY_SNI=$2 ;;
     RELAY_WS_PATH) RELAY_WS_PATH=$2 ;;
+    RELAY_API_TOKEN) RELAY_API_TOKEN=$2 ;;
   esac
 }
 
@@ -593,7 +595,7 @@ start_mux() {
     -upstream-user "$SOCKS_USER" \
     -upstream-pass "$SOCKS_PASS" \
     -client-pass "$SOCKS_PASS" \
-    -api-token "" \
+    -api-token "${RELAY_API_TOKEN:-}" \
     -state-dir "$STATE_DIR" \
     -public-host "$RELAY_PUBLIC_HOST" \
     -private-host "$RELAY_PRIVATE_HOST" \
