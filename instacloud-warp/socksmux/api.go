@@ -19,17 +19,18 @@ import (
 )
 
 type apiOptions struct {
-	StateDir    string
-	Token       string
-	PoolID      string
-	PublicHost  string
-	PrivateHost string
-	MuxPort     int
-	SocksUser   string
-	Rotation    int
-	Batch       int
-	Health      int
-	MinHealthy  int
+	StateDir      string
+	Token         string
+	PoolID        string
+	PublicHost    string
+	PrivateHost   string
+	MuxPort       int
+	SocksUser     string
+	Rotation      int
+	Batch         int
+	Health        int
+	MinHealthy    int
+	UpstreamsFile string
 }
 
 type apiServer struct {
@@ -45,6 +46,7 @@ type apiServer struct {
 	batch       int
 	health      int
 	minHealthy  int
+	hub         *mergedHub
 	ln          *connListener
 }
 
@@ -226,6 +228,7 @@ func newAPIServer(m *mux, o apiOptions) *apiServer {
 		batch:       o.Batch,
 		health:      o.Health,
 		minHealthy:  o.MinHealthy,
+		hub:         newMergedHub(o.StateDir, o.UpstreamsFile, user, func(upstreamSpec) string { return m.clientPass }),
 		ln:          newConnListener(nil),
 	}
 }
@@ -253,6 +256,10 @@ func (a *apiServer) dispatch(c net.Conn) {
 
 func (a *apiServer) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if a.token == "" {
+			next(w, r)
+			return
+		}
 		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if tok == "" {
 			tok = r.Header.Get("X-API-Token")
@@ -293,6 +300,10 @@ func (a *apiServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.handleEndpoints(w, r)
+	case path == "/api/v1/merged-status":
+		a.handleMergedStatus(w, r)
+	case path == "/api/v1/merged-endpoints":
+		a.handleMergedEndpoints(w, r)
 	case path == "/api/v1/config":
 		switch r.Method {
 		case http.MethodGet:
@@ -723,6 +734,9 @@ func (a *apiServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 func (a *apiServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	st := a.status()
 	ok := st.Pool.Healthy >= st.Pool.MinHealthy && st.Pool.Healthy > 0
+	if envString("RELAY_LENIENT_HEALTH", "") == "1" && st.Pool.Count > 0 {
+		ok = true
+	}
 	code := http.StatusOK
 	if !ok {
 		code = http.StatusServiceUnavailable

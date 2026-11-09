@@ -112,6 +112,7 @@ pre{background:#0d1117;border:1px solid var(--line);border-radius:10px;padding:1
     <button data-tab="deploy" aria-pressed="false" onclick="showTab('deploy')">部署参数</button>
     <button data-tab="scale" aria-pressed="false" onclick="showTab('scale')">扩容与区域</button>
     <button data-tab="logs" aria-pressed="false" onclick="showTab('logs')">日志</button>
+    <button data-tab="merged" aria-pressed="false" onclick="showTab('merged')">多池聚合</button>
   </div>
 
   <div data-panel="overview">
@@ -247,6 +248,24 @@ pre{background:#0d1117;border:1px solid var(--line);border-radius:10px;padding:1
     </div>
     <pre id="logs" class="mono">-</pre>
   </div>
+
+  <div data-panel="merged" class="hidden">
+    <div class="row" style="margin-bottom:8px">
+      <h2 style="margin:0">多池聚合</h2>
+      <div class="right row"><button onclick="loadMerged(true)">刷新</button></div>
+    </div>
+    <div class="grid">
+      <div class="card"><div class="k">唯一 /64</div><div class="v" id="mgUnique">-</div></div>
+      <div class="card"><div class="k">端点行数</div><div class="v" id="mgEndpoints">-</div></div>
+      <div class="card"><div class="k">上游池</div><div class="v" id="mgUpstreams">-</div></div>
+    </div>
+    <table><thead><tr><th>上游</th><th>状态</th><th class="num">节点</th><th class="num">可用</th><th class="num">唯一 /64</th><th class="num">延迟</th><th>错误</th></tr></thead><tbody id="mgRows"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody></table>
+    <div class="card" style="margin-top:12px">
+      <h2 style="margin-top:0">合并端点（文本）</h2>
+      <p class="hint">来自 /api/v1/merged-endpoints；每个 /64 固定选一个节点，顺序稳定。</p>
+      <pre id="mgEndpointsText" class="mono">-</pre>
+    </div>
+  </div>
 </main>
 </div>
 <div id="toast" class="toast"></div>
@@ -292,6 +311,7 @@ function showTab(name){
   for(const b of document.querySelectorAll('#tabs button'))b.setAttribute('aria-pressed',b.dataset.tab===name?'true':'false');
   for(const p of document.querySelectorAll('[data-panel]'))p.classList.toggle('hidden',p.dataset.panel!==name);
   if(name==='logs')loadLogs();
+  if(name==='merged')loadMerged();
 }
 async function loadAll(){
   await Promise.allSettled([loadStatus(),loadMeta(),loadConfig(),loadEndpoints(),loadLogs()]);
@@ -425,6 +445,19 @@ async function loadConfig(){
 async function loadLogs(){
   try{ $('logs').textContent=await api('/api/v1/logs?lines='+$('logLines').value) }
   catch(e){ $('logs').textContent='错误: '+e.message }
+}
+async function loadMerged(fresh){
+  try{
+    const s=await api('/api/v1/merged-status'+(fresh?'?fresh=1':''));
+    $('mgUnique').textContent=s.unique64;
+    $('mgEndpoints').textContent=s.endpoints;
+    $('mgUpstreams').textContent=(s.upstreams||[]).length;
+    $('mgRows').innerHTML=(s.upstreams||[]).map(u=>'<tr><td class="mono">'+esc(u.name)+'</td><td><span class="dot '+(u.ok?'ok':'bad')+'"></span>'+(u.ok?'ok':'fail')+'</td><td class="num">'+u.nodes_total+'</td><td class="num">'+u.nodes_ok+'</td><td class="num">'+u.unique64+'</td><td class="num">'+u.latency_ms+'ms</td><td class="muted small">'+esc(u.error||'-')+'</td></tr>').join('')||'<tr><td colspan="7" class="muted">没有配置上游池</td></tr>';
+    $('mgEndpointsText').textContent=(s.nodes||[]).map(n=>n.url).join('\n')||'(空)';
+  }catch(e){
+    $('mgRows').innerHTML='<tr><td colspan="7" class="muted">'+esc(e.message)+'</td></tr>';
+    $('mgEndpointsText').textContent='(不可用)';
+  }
 }
 function toggleSecret(key){
   state.revealed[key]=!state.revealed[key];

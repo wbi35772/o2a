@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -47,7 +48,7 @@ func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
 func main() {
 	var m mux
-	var apiToken, stateDir, publicHost, privateHost, poolID string
+	var apiToken, stateDir, publicHost, privateHost, poolID, upstreamsFile string
 	var rotation, batch, health, minHealthy, muxPort int
 	flag.StringVar(&m.listen, "listen", "0.0.0.0:1081", "listen address")
 	flag.StringVar(&m.backendHost, "backend-host", "127.0.0.1", "wireproxy host")
@@ -61,6 +62,7 @@ func main() {
 	flag.StringVar(&publicHost, "public-host", "", "public host advertised to clients")
 	flag.StringVar(&privateHost, "private-host", "", "private host advertised to clients")
 	flag.StringVar(&poolID, "pool-id", "", "pool identifier shown in the API")
+	flag.StringVar(&upstreamsFile, "upstreams-file", "", "upstreams.json for merged aggregation (default: <state-dir>/control/upstreams.json)")
 	flag.IntVar(&rotation, "rotation-interval", 900, "default node rotation interval seconds")
 	flag.IntVar(&batch, "reroll-batch", 4, "default nodes rerolled per cycle")
 	flag.IntVar(&health, "health-interval", 300, "default health probe interval seconds")
@@ -91,7 +93,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen %s: %v", m.listen, err)
 	}
-	if apiToken != "" {
+	if apiToken != "" || os.Getenv("API_ALLOW_ANON") == "1" {
 		m.api = newAPIServer(&m, apiOptions{
 			StateDir:    stateDir,
 			Token:       apiToken,

@@ -152,6 +152,9 @@ fetch_once() {
   fi
 
   grep '^socks5://' "$merged" 2>/dev/null | awk '!seen[$0]++' >"$tmp" || true
+  if [ -f "${RELAY_EGRESS_FILE:-$BASE/relay-egress.txt}" ]; then
+    grep '^socks5://' "${RELAY_EGRESS_FILE:-$BASE/relay-egress.txt}" 2>/dev/null >>"$tmp" || true
+  fi
   n=$(grep -c '^socks5://' "$tmp" 2>/dev/null || true)
   rm -f "$merged"
   if [ "${n:-0}" -eq 0 ]; then

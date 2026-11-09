@@ -25,3 +25,6 @@ coverage.out
 .insta/agent-session.json
 
 .insta/.agent-session-*.tmp
+
+# Local: the control plane this machine linked against
+.insta/link-plane.json
