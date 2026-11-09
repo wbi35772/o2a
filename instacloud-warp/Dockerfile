@@ -10,6 +10,8 @@ ARG WGCF_REPO=https://github.com/ViRb3/wgcf.git
 ARG WGCF_REF=v2.3.1
 ARG WIREPROXY_REPO=https://github.com/windtf/wireproxy.git
 ARG WIREPROXY_REF=35cce290db2f32d5e4316bd54102186f486d0af4
+ARG SING_BOX_VERSION=1.11.15
+ARG SING_BOX_ARCH=amd64
 ARG APK_MIRROR_HOST
 ARG GOPROXY_URL=https://proxy.golang.org,direct
 
@@ -18,7 +20,7 @@ ENV GOPROXY=${GOPROXY_URL}
 RUN if [ "${APK_MIRROR_HOST}" != "dl-cdn.alpinelinux.org" ]; then \
       sed -i "s#dl-cdn.alpinelinux.org#${APK_MIRROR_HOST}#g" /etc/apk/repositories; \
     fi && \
-    apk add --no-cache git ca-certificates
+    apk add --no-cache git ca-certificates curl tar
 WORKDIR /src
 
 RUN git clone --depth 1 --branch "${WGCF_REF}" "${WGCF_REPO}" wgcf
@@ -32,6 +34,11 @@ RUN mkdir -p /out && git clone "${WIREPROXY_REPO}" wireproxy && \
 
 COPY socksmux /src/socksmux
 RUN cd /src/socksmux && CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /out/socksmux .
+
+RUN curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-linux-${SING_BOX_ARCH}.tar.gz" -o /tmp/sing-box.tar.gz && \
+    tar -xzf /tmp/sing-box.tar.gz -C /tmp && \
+    cp "/tmp/sing-box-${SING_BOX_VERSION}-linux-${SING_BOX_ARCH}/sing-box" /out/sing-box && \
+    chmod 0755 /out/sing-box
 
 FROM ${RUNTIME_IMAGE}
 
@@ -48,10 +55,12 @@ RUN if [ "${APK_MIRROR_HOST}" != "dl-cdn.alpinelinux.org" ]; then \
 COPY --from=build /out/wgcf /usr/local/bin/wgcf
 COPY --from=build /out/wireproxy /usr/local/bin/wireproxy
 COPY --from=build /out/socksmux /usr/local/bin/socksmux
+COPY --from=build /out/sing-box /usr/local/bin/sing-box
 COPY endpoints.txt /usr/local/share/warp-pool/endpoints.txt
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY relay-entrypoint.sh /usr/local/bin/relay-entrypoint.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck.sh
-RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/relay-entrypoint.sh /usr/local/bin/healthcheck.sh
 
 ENV STATE_DIR=/data \
     START_PORT=1081 \

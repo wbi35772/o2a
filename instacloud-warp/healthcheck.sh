@@ -2,6 +2,13 @@
 set -euo pipefail
 
 STATE_DIR="${STATE_DIR:-/data}"
+
+if [[ -f "$STATE_DIR/relay-mode" ]]; then
+  (exec 3<>"/dev/tcp/127.0.0.1/${MUX_PORT:-1081}") 2>/dev/null || exit 1
+  exec 3>&- 3<&-
+  exit 0
+fi
+
 STATUS_FILE="$STATE_DIR/status.tsv"
 MIN_HEALTHY="${MIN_HEALTHY:-14}"
 SOCKS_USER="${SOCKS_USER:?SOCKS_USER must be set}"

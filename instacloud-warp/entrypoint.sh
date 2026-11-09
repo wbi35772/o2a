@@ -5,6 +5,10 @@
 set -Eeuo pipefail
 umask 022
 
+if [[ "${ROLE:-}" == "relay" ]]; then
+  exec /usr/local/bin/relay-entrypoint.sh
+fi
+
 STATE_DIR="${STATE_DIR:-/data}"
 START_PORT="${START_PORT:-1081}"
 INSTANCE_COUNT="${INSTANCE_COUNT:-${POOL_SIZE:-16}}"
