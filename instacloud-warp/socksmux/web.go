@@ -1,506 +1,434 @@
 package main
 
 import (
+	"io"
 	"net/http"
 )
 
-// handleUI serves the embedded single-page console. The page talks to the
-// management API on the same origin and keeps the bearer token in localStorage.
+// handleUI serves the single-page console. Authentication is enforced by the
+// API layer: the page renders, the first API call returns 401 and the login
+// form takes over.
 func (a *apiServer) handleUI(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	if r.Method == http.MethodHead {
-		return
-	}
-	_, _ = w.Write([]byte(uiHTML))
+	_, _ = io.WriteString(w, uiHTML)
 }
 
-const uiHTML = `<!doctype html>
+const uiHTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WARP Pool Console</title>
 <style>
-:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--fg:#e6e9ef;--mut:#8b93a3;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#58a6ff;--acc2:#1f6feb}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans SC",sans-serif}
-a{color:var(--acc)}.hidden{display:none!important}
-.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
-.login-card{width:100%;max-width:420px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px}
-.login-card h1{font-size:20px;margin:0 0 6px}.login-card p{margin:0 0 18px;color:var(--mut);font-size:13px}
-header{display:flex;align-items:center;gap:10px;padding:12px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap;position:sticky;top:0;background:rgba(15,17,21,.94);backdrop-filter:blur(8px);z-index:10}
-h1{font-size:16px;margin:0;font-weight:600}
-.badge{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--mut);white-space:nowrap}
-.badge.ok{color:var(--ok);border-color:#1f4327}.badge.warn{color:var(--warn);border-color:#4a3a12}.badge.bad{color:var(--bad);border-color:#4a1f1f}
-main{padding:14px 20px 60px;max-width:1320px;margin:0 auto}
-.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 16px}
-.tabs button{background:#161a22;color:var(--mut);border:1px solid var(--line);border-radius:8px;padding:7px 12px;cursor:pointer;font-size:13px}
-.tabs button[aria-pressed="true"]{background:var(--acc2);border-color:var(--acc2);color:#fff}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:16px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
-.card .k{color:var(--mut);font-size:12px;margin-bottom:4px}
-.card .v{font-size:20px;font-variant-numeric:tabular-nums}
-section{margin-top:18px}
-section h2{font-size:13px;letter-spacing:.02em;color:var(--mut);text-transform:uppercase;margin:0 0 8px}
-table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:middle}
-th{color:var(--mut);font-weight:500;background:#141821;white-space:nowrap}
-tr:last-child td{border-bottom:0}
-td.num,th.num{font-variant-numeric:tabular-nums;text-align:right}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--mut)}
-.dot.ok{background:var(--ok)}.dot.bad{background:var(--bad)}.dot.warn{background:var(--warn)}
-button{background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:5px 10px;cursor:pointer;font-size:12px}
-button:hover{border-color:#3d444d}button.primary{background:var(--acc2);border-color:var(--acc2);color:#fff}button:disabled{opacity:.5;cursor:default}
-input,select,textarea{background:#0d1117;color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:8px 9px;font-size:13px;width:100%}
-textarea{min-height:90px;resize:vertical}
-label{display:block;color:var(--mut);font-size:12px;margin-bottom:4px}
-.form{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;align-items:end}
-pre{background:#0d1117;border:1px solid var(--line);border-radius:10px;padding:12px;overflow:auto;max-height:360px;font-size:12px;margin:0;white-space:pre-wrap;word-break:break-all}
-.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.right{margin-left:auto}.muted{color:var(--mut)}.small{font-size:12px}
-.toast{position:fixed;right:16px;bottom:16px;background:var(--acc2);color:#fff;padding:9px 14px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:70vw;z-index:40}
-.toast.show{opacity:1}.toast.err{background:#b62324}
-.hint{font-size:12px;color:var(--mut);margin-top:6px;line-height:1.5}
-.kv{display:grid;grid-template-columns:150px 1fr auto auto;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
-.kv:last-child{border-bottom:0}.kv .k{color:var(--mut);font-size:12px}
-.secret{letter-spacing:.08em}
-.pill{display:inline-block;padding:1px 7px;border-radius:999px;background:#1b2431;color:#9db7d6;font-size:11px;margin:2px 4px 2px 0}
-.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-@media(max-width:900px){.two{grid-template-columns:1fr}.kv{grid-template-columns:1fr auto auto}.kv .k{grid-column:1/-1}}
+:root {
+  --bg:#0d0f14; --panel:#171a21; --panel2:#1b1f27; --line:#252b36; --line2:#2f3745;
+  --fg:#e6e9ef; --muted:#8b94a7; --accent:#3b82f6; --ok:#35c48a; --warn:#e0a63a; --bad:#e05a5a;
+  --mono:ui-monospace,SFMono-Regular,Consolas,monospace;
+}
+* { box-sizing:border-box }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans SC",sans-serif }
+header { position:sticky; top:0; z-index:20; display:flex; align-items:center; gap:14px; padding:12px 20px; background:rgba(13,15,20,.94); border-bottom:1px solid var(--line) }
+h1 { font-size:16px; margin:0; font-weight:600; letter-spacing:.3px }
+.pill { display:inline-flex; align-items:center; gap:6px; padding:2px 9px; border:1px solid var(--line2); border-radius:999px; font-size:12px; color:var(--muted) }
+.pill.ok { color:var(--ok); border-color:rgba(53,196,138,.4) }
+.pill.bad { color:var(--bad); border-color:rgba(224,90,90,.4) }
+.spacer { flex:1 }
+button, .btn { font:inherit; color:var(--fg); background:var(--panel2); border:1px solid var(--line2); border-radius:8px; padding:6px 12px; cursor:pointer }
+button:hover { border-color:var(--accent) }
+button.primary { background:var(--accent); border-color:var(--accent); color:#fff }
+button.danger { color:var(--bad); border-color:rgba(224,90,90,.45) }
+button.small { padding:3px 9px; font-size:12px }
+button:disabled { opacity:.5; cursor:default }
+nav { display:flex; flex-wrap:wrap; gap:8px; padding:12px 20px 0 }
+nav button { border-radius:8px 8px 0 0; border-bottom-color:transparent; color:var(--muted) }
+nav button.active { color:var(--fg); background:var(--panel); border-color:var(--line2); border-bottom-color:var(--panel) }
+main { padding:16px 20px 60px; max-width:1400px }
+.tab { display:none }
+.tab.active { display:block }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin-bottom:16px }
+.card h2 { font-size:15px; margin:0 0 10px; font-weight:600 }
+.card h3 { font-size:13px; margin:16px 0 8px; color:var(--muted); font-weight:600; letter-spacing:.4px; text-transform:uppercase }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px }
+.stat { background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:12px 14px }
+.stat .k { color:var(--muted); font-size:12px }
+.stat .v { font-size:22px; font-weight:650; margin-top:2px; font-family:var(--mono) }
+.two { display:grid; grid-template-columns:1fr 1fr; gap:16px }
+@media (max-width:980px){ .two { grid-template-columns:1fr } }
+table { width:100%; border-collapse:collapse }
+th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top }
+th { color:var(--muted); font-weight:500; font-size:12px; white-space:nowrap }
+tr:hover td { background:rgba(59,130,246,.05) }
+.mono { font-family:var(--mono); font-size:12.5px; word-break:break-all }
+.muted { color:var(--muted) }
+.kv { display:grid; grid-template-columns:150px 1fr; gap:6px 12px; align-items:start }
+.kv .k { color:var(--muted) }
+.kv .v { font-family:var(--mono); font-size:12.5px; word-break:break-all }
+.tag { display:inline-block; padding:1px 7px; border-radius:999px; font-size:11px; border:1px solid var(--line2); color:var(--muted) }
+.tag.ok { color:var(--ok); border-color:rgba(53,196,138,.45) }
+.tag.bad { color:var(--bad); border-color:rgba(224,90,90,.45) }
+.tag.relay { color:#7cc4ff; border-color:rgba(59,130,246,.5) }
+.tag.de { color:var(--warn); border-color:rgba(224,166,58,.45) }
+.note { background:rgba(59,130,246,.07); border:1px solid rgba(59,130,246,.25); border-radius:8px; padding:10px 12px; color:#c7d2e5; font-size:13px; margin-top:10px }
+.note b { color:#fff }
+.warnbox { background:rgba(224,166,58,.08); border:1px solid rgba(224,166,58,.35); border-radius:8px; padding:10px 12px; font-size:13px; margin-top:10px }
+pre { background:#0b0d12; border:1px solid var(--line); border-radius:8px; padding:12px; overflow:auto; max-height:520px; font-family:var(--mono); font-size:12px; margin:0 }
+input, select { font:inherit; color:var(--fg); background:#0b0d12; border:1px solid var(--line2); border-radius:8px; padding:7px 10px; min-width:0 }
+input[type=text], input[type=password] { width:100% }
+.row { display:flex; flex-wrap:wrap; gap:8px; align-items:center }
+.row > input[type=text] { flex:1 1 200px }
+.login { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(9,11,15,.92); z-index:100 }
+.login.show { display:flex }
+.login .card { width:min(380px,92vw); margin:0 }
+.login h2 { text-align:center; margin-bottom:16px }
+.err { color:var(--bad); font-size:13px; min-height:18px; margin-top:8px }
+.toast { position:fixed; right:18px; bottom:18px; background:#1d2430; border:1px solid var(--line2); border-left:3px solid var(--accent); border-radius:8px; padding:10px 14px; font-size:13px; max-width:420px; opacity:0; transform:translateY(8px); transition:.18s; z-index:120; pointer-events:none }
+.toast.show { opacity:1; transform:none }
+.toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:12px }
+.pager { display:flex; gap:8px; align-items:center; justify-content:flex-end; margin-top:10px; color:var(--muted) }
+.hint { color:var(--muted); font-size:12.5px }
+details { margin-top:10px }
+summary { cursor:pointer; color:var(--muted) }
+code { font-family:var(--mono); background:#0b0d12; border:1px solid var(--line); border-radius:4px; padding:0 4px }
 </style>
 </head>
 <body>
-<div id="loginView" class="login-wrap">
-  <form class="login-card" onsubmit="doLogin(event)">
-    <h1>WARP Pool Console</h1>
-    <p>使用池 API Token 登录。Token 就是池容器的 API_TOKEN / POOL_API_TOKEN。</p>
-    <label for="loginToken">API Token</label>
-    <input id="loginToken" type="password" autocomplete="current-password" placeholder="pool-..." autofocus>
-    <div style="height:14px"></div>
-    <button class="primary" type="submit" style="width:100%;padding:9px">登录</button>
-    <p id="loginError" class="hint" style="color:var(--bad);min-height:18px"></p>
-    <p class="hint">登录后可在「连接与鉴权」里复制 API 地址、Token、SOCKS 账号。</p>
-  </form>
-</div>
-
-<div id="appView" class="hidden">
 <header>
   <h1>WARP Pool Console</h1>
-  <span id="poolId" class="badge mono">-</span>
-  <span id="healthBadge" class="badge">unknown</span>
-  <span id="regionBadge" class="badge">-</span>
-  <div class="right row">
-    <button onclick="loadAll()">刷新</button>
-    <button onclick="logout(true)">退出</button>
-  </div>
+  <span class="pill" id="poolId">-</span>
+  <span class="pill" id="healthPill">-</span>
+  <span class="pill" id="regionPill">-</span>
+  <span class="spacer"></span>
+  <button onclick="loadAll()">刷新</button>
+  <button onclick="logout()">退出</button>
 </header>
+<nav id="nav"></nav>
 <main>
-  <div class="tabs" id="tabs">
-    <button data-tab="overview" aria-pressed="true" onclick="showTab('overview')">概览</button>
-    <button data-tab="nodes" aria-pressed="false" onclick="showTab('nodes')">节点</button>
-    <button data-tab="connect" aria-pressed="false" onclick="showTab('connect')">连接与鉴权</button>
-    <button data-tab="deploy" aria-pressed="false" onclick="showTab('deploy')">部署参数</button>
-    <button data-tab="scale" aria-pressed="false" onclick="showTab('scale')">扩容与区域</button>
-    <button data-tab="logs" aria-pressed="false" onclick="showTab('logs')">日志</button>
-    <button data-tab="merged" aria-pressed="false" onclick="showTab('merged')">多池聚合</button>
-  </div>
-
-  <div data-panel="overview">
-    <div class="grid">
-      <div class="card"><div class="k">健康节点</div><div class="v" id="mHealthy">-</div></div>
-      <div class="card"><div class="k">启用节点</div><div class="v" id="mEnabled">-</div></div>
-      <div class="card"><div class="k">节点总数</div><div class="v" id="mCount">-</div></div>
-      <div class="card"><div class="k">地区</div><div class="v" id="mRegions">-</div></div>
-      <div class="card"><div class="k">节点端口范围</div><div class="v small" id="mPorts">-</div></div>
-      <div class="card"><div class="k">轮换间隔</div><div class="v" id="mRotation">-</div></div>
-    </div>
-    <div class="two">
-      <div class="card">
-        <h2 style="margin-top:0">区域分布</h2>
-        <table><thead><tr><th>地区</th><th class="num">节点</th><th class="num">健康</th><th>出口 /64 前缀</th></tr></thead><tbody id="regionRows"><tr><td colspan="4" class="muted">加载中…</td></tr></tbody></table>
-        <p class="hint">WARP 走 Anycast，出口地区由池容器所在地区决定；同一池里所有节点通常落在同一个地区。</p>
-      </div>
-      <div class="card">
-        <h2 style="margin-top:0">网关接入（最短路径）</h2>
-        <div class="kv"><span class="k">API 地址</span><code id="ovApi" class="mono">-</code><button onclick="copyVal('ovApi')">复制</button><span></span></div>
-        <div class="kv"><span class="k">API Token</span><code id="ovToken" class="mono secret">-</code><button onclick="toggleSecret('apiToken')">显示</button><button onclick="copySecret('apiToken')">复制</button></div>
-        <div class="kv"><span class="k">范围</span><code id="ovScope" class="mono">private</code><button onclick="copyVal('ovScope')">复制</button><span></span></div>
-        <p class="hint">同平台网关填私网地址；其它平台填公网地址。把这两项加到网关「配置中心 → 代理 → 代理中心 → 静态池 → 新增池」。</p>
-      </div>
-    </div>
-  </div>
-
-  <div data-panel="nodes" class="hidden">
-    <div class="row" style="margin-bottom:8px">
-      <h2 style="margin:0">节点</h2>
-      <div class="right row">
-        <button onclick="loadStatus()">刷新</button>
-        <button onclick="post('/api/v1/reroll')">全部轮换</button>
-      </div>
-    </div>
-    <table>
-      <thead><tr><th class="num">#</th><th>用户</th><th class="num">端口</th><th>状态</th><th>出口 IPv6</th><th>地区</th><th>入口 endpoint</th><th class="num">连接</th><th class="num">上行</th><th class="num">下行</th><th>更新时间</th><th>操作</th></tr></thead>
-      <tbody id="nodes"><tr><td colspan="12" class="muted">加载中…</td></tr></tbody>
-    </table>
-  </div>
-
-  <div data-panel="connect" class="hidden">
-    <div class="two">
-      <div class="card">
-        <h2 style="margin-top:0">连接信息</h2>
-        <div class="kv"><span class="k">Pool ID</span><code id="poolIdValue" class="mono">-</code><button onclick="copyVal('poolIdValue')">复制</button><span></span></div>
-        <div class="kv"><span class="k">API 地址（私网）</span><code id="apiPrivate" class="mono">-</code><button onclick="copyVal('apiPrivate')">复制</button><span></span></div>
-        <div class="kv"><span class="k">API 地址（公网）</span><code id="apiPublic" class="mono">-</code><button onclick="copyVal('apiPublic')">复制</button><span></span></div>
-        <div class="kv"><span class="k">API Token</span><code id="apiToken" class="mono secret">-</code><button onclick="toggleSecret('apiToken')">显示</button><button onclick="copySecret('apiToken')">复制</button></div>
-        <div class="kv"><span class="k">SOCKS 用户</span><code id="socksUser" class="mono">-</code><button onclick="copyVal('socksUser')">复制</button><span></span></div>
-        <div class="kv"><span class="k">SOCKS 密码</span><code id="socksPass" class="mono secret">-</code><button onclick="toggleSecret('socksPass')">显示</button><button onclick="copySecret('socksPass')">复制</button></div>
-        <div class="kv"><span class="k">Mux 端口</span><code id="muxPortValue" class="mono">-</code><button onclick="copyVal('muxPortValue')">复制</button><span></span></div>
-        <p class="hint">API Token 既是本控制台登录密码，也是网关静态池要填的 Bearer token。SOCKS 密码用于直连 mux 的客户端；网关同步端点时会自动带上。</p>
-      </div>
-      <div class="card">
-        <h2 style="margin-top:0">填到网关静态池</h2>
-        <p class="hint">在网关「配置中心 → 代理 → 代理中心 → 静态池 → 新增池」填：</p>
-        <pre id="gatewayExample" class="mono">-</pre>
-        <div class="row" style="margin-top:8px">
-          <button class="primary" onclick="copyVal('gatewayExample')">复制接入信息</button>
-        </div>
-        <p class="hint">同平台（例如 FRA 网关 + 同项目池）用私网地址；跨平台或本地电脑用公网地址。范围 private/public 决定网关从池里取哪一组 SOCKS 主机名。</p>
-      </div>
-    </div>
-  </div>
-
-  <div data-panel="deploy" class="hidden">
-    <div class="row" style="margin-bottom:8px">
-      <h2 style="margin:0">部署参数</h2>
-      <div class="right row"><button onclick="copyVal('deployJson')">复制 JSON</button></div>
-    </div>
-    <div class="two">
-      <div class="card">
-        <table><thead><tr><th>参数</th><th>当前值</th></tr></thead><tbody id="deployRows"><tr><td colspan="2" class="muted">加载中…</td></tr></tbody></table>
-      </div>
-      <div class="card">
-        <h2 style="margin-top:0">部署 env（JSON）</h2>
-        <pre id="deployJson" class="mono">-</pre>
-        <p class="hint">这些是容器启动参数。改 INSTANCE_COUNT / START_PORT 后重新部署才会改变启动规模；运行中扩缩容请用「扩容与区域」页，不用改 env。</p>
-      </div>
-    </div>
-    <div class="card" style="margin-top:12px">
-      <h2 style="margin-top:0">运行时调参</h2>
-      <div class="form">
-        <div><label>轮换间隔（秒）</label><input id="cfgRotation" type="number" min="60" max="86400"></div>
-        <div><label>每轮轮换数</label><input id="cfgBatch" type="number" min="1"></div>
-        <div><label>健康检查间隔（秒）</label><input id="cfgHealth" type="number" min="30" max="86400"></div>
-        <div><label>最小健康数</label><input id="cfgMin" type="number" min="0"></div>
-        <div><button class="primary" onclick="saveConfig()">保存并热加载</button></div>
-      </div>
-      <p class="hint">写入 /data/control/config.json，entrypoint 在下一个循环读取，不需要重启。</p>
-    </div>
-  </div>
-
-  <div data-panel="scale" class="hidden">
-    <div class="two">
-      <div class="card">
-        <h2 style="margin-top:0">在线扩缩容</h2>
-        <div class="kv"><span class="k">当前节点数</span><code id="scaleCurrent" class="mono">-</code><span></span><span></span></div>
-        <div class="kv"><span class="k">节点端口范围</span><code id="scalePorts" class="mono">-</code><span></span><span></span></div>
-        <div class="kv"><span class="k">Mux 端口</span><code id="scaleMux" class="mono">-</code><span></span><span></span></div>
-        <div class="form" style="margin-top:12px">
-          <div><label>目标节点数（1-1024）</label><input id="scaleCount" type="number" min="1" max="1024"></div>
-          <div><button class="primary" onclick="applyScale()">应用扩缩容</button></div>
-        </div>
-        <p class="hint">扩容会启动新 wireproxy 并重启 mux，API 和 SOCKS 会中断几秒；已注册账号保留。缩容会停掉尾部节点。目标值持久化到 /data/control/scale，重启后仍生效。</p>
-        <p class="hint">端口上限由 <code>scale_max</code> 决定；超过 1024 或与 mux 端口冲突会被拒绝。</p>
-      </div>
-      <div class="card">
-        <h2 style="margin-top:0">换地区 / 多池</h2>
-        <p class="hint">WARP 是 Anycast：出口地区由池容器所在地区决定（当前 <code id="scaleRegion">-</code>），改节点数不会换地区。</p>
-        <p class="hint">要覆盖更多地区，在目标地区再部署一个同样的池服务，设置不同的 <code>POOL_ID</code>、<code>STATE_DIR</code>（或独立卷）和端口，然后把它的 API 地址 + token 加到网关静态池。网关会合并去重所有启用池的端点。</p>
-        <div class="row" style="margin-top:8px">
-          <button class="primary" onclick="copyVal('deployEnv')">复制新池部署 env</button>
-        </div>
-        <pre id="deployEnv" class="mono" style="margin-top:8px">-</pre>
-      </div>
-    </div>
-    <div class="card" style="margin-top:12px">
-      <h2 style="margin-top:0">WARP 入口 endpoint 候选</h2>
-      <p class="hint">每个节点从下列 Cloudflare Anycast 地址里随机选一个入口；换 endpoint 只影响入口，不改变出口地区。</p>
-      <div id="endpointPills"><span class="muted">加载中…</span></div>
-    </div>
-  </div>
-
-  <div data-panel="logs" class="hidden">
-    <div class="row" style="margin-bottom:8px">
-      <h2 style="margin:0">日志</h2>
-      <div class="right row">
-        <select id="logLines" style="width:110px" onchange="loadLogs()"><option>100</option><option selected>200</option><option>500</option><option>1000</option></select>
-        <button onclick="loadLogs()">刷新</button>
-      </div>
-    </div>
-    <pre id="logs" class="mono">-</pre>
-  </div>
-
-  <div data-panel="merged" class="hidden">
-    <div class="row" style="margin-bottom:8px">
-      <h2 style="margin:0">多池聚合</h2>
-      <div class="right row"><button onclick="loadMerged(true)">刷新</button></div>
-    </div>
-    <div class="grid">
-      <div class="card"><div class="k">唯一 /64</div><div class="v" id="mgUnique">-</div></div>
-      <div class="card"><div class="k">端点行数</div><div class="v" id="mgEndpoints">-</div></div>
-      <div class="card"><div class="k">上游池</div><div class="v" id="mgUpstreams">-</div></div>
-    </div>
-    <table><thead><tr><th>上游</th><th>状态</th><th class="num">节点</th><th class="num">可用</th><th class="num">唯一 /64</th><th class="num">延迟</th><th>错误</th></tr></thead><tbody id="mgRows"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody></table>
-    <div class="card" style="margin-top:12px">
-      <h2 style="margin-top:0">合并端点（文本）</h2>
-      <p class="hint">来自 /api/v1/merged-endpoints；每个 /64 固定选一个节点，顺序稳定。</p>
-      <pre id="mgEndpointsText" class="mono">-</pre>
-    </div>
-  </div>
+  <section class="tab" id="tab-overview"></section>
+  <section class="tab" id="tab-nodes"></section>
+  <section class="tab" id="tab-connect"></section>
+  <section class="tab" id="tab-deploy"></section>
+  <section class="tab" id="tab-scale"></section>
+  <section class="tab" id="tab-logs"></section>
+  <section class="tab" id="tab-merged"></section>
 </main>
+
+<div class="login" id="login">
+  <div class="card">
+    <h2>登录 WARP Pool Console</h2>
+    <form onsubmit="doLogin(event)">
+      <div style="margin-bottom:10px"><input type="text" id="lu" placeholder="用户名（默认 admin）" autocomplete="username"></div>
+      <div style="margin-bottom:10px"><input type="password" id="lp" placeholder="密码" autocomplete="current-password"></div>
+      <button class="primary" style="width:100%" type="submit">登录</button>
+      <div class="err" id="lerr"></div>
+    </form>
+    <div class="hint" style="margin-top:12px">账号由容器环境变量 POOL_ADMIN_USER / POOL_ADMIN_PASSWORD 控制。API Token 仍可用于网关与脚本调用，登录只用于控制台。</div>
+  </div>
 </div>
-<div id="toast" class="toast"></div>
+<div class="toast" id="toast"></div>
+
 <script>
-let token=localStorage.getItem('warp_pool_token')||'';
-let timer=null,scope='private';
-const state={meta:null,status:null,revealed:{}};
-const $=id=>document.getElementById(id);
-const esc=v=>String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function toast(msg,err){const t=$('toast');t.textContent=msg;t.className='toast show'+(err?' err':'');clearTimeout(t._h);t._h=setTimeout(()=>t.className='toast',3000)}
-function fmt(n){n=Number(n||0);if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KB';if(n<1073741824)return (n/1048576).toFixed(1)+' MB';return (n/1073741824).toFixed(2)+' GB'}
-function ago(ts){if(!ts)return '-';const s=Math.max(0,Math.floor(Date.now()/1000-Number(ts)));if(s<60)return s+'s 前';if(s<3600)return Math.floor(s/60)+'m 前';return Math.floor(s/3600)+'h 前'}
-function showLogin(){$('loginView').classList.remove('hidden');$('appView').classList.add('hidden');setTimeout(()=>$('loginToken').focus(),50)}
-function showApp(){$('loginView').classList.add('hidden');$('appView').classList.remove('hidden')}
-function logout(notify){token='';localStorage.removeItem('warp_pool_token');state.meta=null;state.status=null;showLogin();if(notify)toast('已退出')}
-async function api(path,opt={}){
-  const r=await fetch(path,{...opt,headers:{'Authorization':'Bearer '+token,...(opt.headers||{})}});
-  if(r.status===401){logout(false);throw new Error('登录已失效')}
-  const ct=r.headers.get('content-type')||'';
-  const body=ct.includes('json')?await r.json():await r.text();
-  if(!r.ok)throw new Error(typeof body==='string'?body:(body.error||r.status));
-  return body;
+var STATE = { status:null, meta:null, tokens:null, tab:"overview", nodePage:1, nodeQuery:"", nodeFilter:"all", nodePageSize:20, authed:false };
+var TABS = [["overview","概览"],["nodes","节点"],["connect","连接与鉴权"],["deploy","部署参数"],["scale","扩容与区域"],["logs","日志"],["merged","多池聚合"]];
+
+function esc(v){ return String(v==null?"":v).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
+function fmtBytes(n){ n=Number(n||0); if(!n) return "0 B"; var u=["B","KB","MB","GB","TB"]; var i=0; while(n>=1024&&i<u.length-1){n/=1024;i++} return (i?n.toFixed(1):n)+" "+u[i]; }
+function ago(ts){ if(!ts) return "-"; var d=Math.max(0,Math.floor(Date.now()/1000-ts)); if(d<60) return d+"s 前"; if(d<3600) return Math.floor(d/60)+"m 前"; if(d<86400) return Math.floor(d/3600)+"h 前"; return Math.floor(d/86400)+"d 前"; }
+function toast(msg){ var t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(function(){t.classList.remove("show")},2600); }
+function copy(text){ if(!text){ toast("没有可复制内容"); return; } if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(text).then(function(){toast("已复制")},function(){fallbackCopy(text)}); } else { fallbackCopy(text); } }
+function fallbackCopy(text){ var a=document.createElement("textarea"); a.value=text; document.body.appendChild(a); a.select(); try{document.execCommand("copy"); toast("已复制")}catch(e){toast("复制失败")} document.body.removeChild(a); }
+
+function api(path, opts){
+  opts = opts || {};
+  opts.credentials = "same-origin";
+  var headers = opts.headers || {};
+  if (opts.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  opts.headers = headers;
+  return fetch("/api/v1" + path, opts).then(function(res){
+    if(res.status===401){ showLogin(true); throw new Error("unauthorized"); }
+    return res.text().then(function(text){
+      var data = null;
+      try { data = text ? JSON.parse(text) : null } catch(e) { data = text }
+      if(!res.ok){ throw new Error((data&&data.error)||("HTTP "+res.status)); }
+      return data;
+    });
+  });
 }
-async function doLogin(e){
-  e.preventDefault();
-  const value=$('loginToken').value.trim();
-  if(!value){$('loginError').textContent='请输入 API Token';return}
-  token=value;
-  $('loginError').textContent='';
-  try{
-    await api('/api/v1/status');
-    localStorage.setItem('warp_pool_token',token);
-    $('loginToken').value='';
-    showApp();
-    await loadAll();
-    toast('已登录');
-  }catch(err){
-    token='';
-    $('loginError').textContent='登录失败：'+err.message;
-  }
+function showLogin(show){ document.getElementById("login").classList.toggle("show", !!show); if(show) setTimeout(function(){document.getElementById("lu").focus()},50); }
+function doLogin(ev){
+  ev.preventDefault();
+  var err=document.getElementById("lerr"); err.textContent="";
+  fetch("/api/v1/login",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("lu").value,password:document.getElementById("lp").value})})
+  .then(function(r){ return r.text().then(function(t){ var d=null; try{d=JSON.parse(t)}catch(e){d=t} if(!r.ok) throw new Error((d&&d.error)||"登录失败"); return d; }) })
+  .then(function(){ STATE.authed=true; showLogin(false); document.getElementById("lp").value=""; loadAll(); })
+  .catch(function(e){ err.textContent=e.message; });
 }
-function showTab(name){
-  for(const b of document.querySelectorAll('#tabs button'))b.setAttribute('aria-pressed',b.dataset.tab===name?'true':'false');
-  for(const p of document.querySelectorAll('[data-panel]'))p.classList.toggle('hidden',p.dataset.panel!==name);
-  if(name==='logs')loadLogs();
-  if(name==='merged')loadMerged();
+function logout(){ api("/logout",{method:"POST"}).then(function(){ STATE.authed=false; showLogin(true); }).catch(function(){ showLogin(true); }); }
+
+function renderNav(){
+  document.getElementById("nav").innerHTML = TABS.map(function(t){
+    return "<button class=\""+(STATE.tab===t[0]?"active":"")+"\" onclick=\"switchTab('"+t[0]+"')\">"+t[1]+"</button>";
+  }).join("");
 }
-async function loadAll(){
-  await Promise.allSettled([loadStatus(),loadMeta(),loadConfig(),loadEndpoints(),loadLogs()]);
+function switchTab(id){ STATE.tab=id; renderNav(); TABS.forEach(function(t){ document.getElementById("tab-"+t[0]).classList.toggle("active",t[0]===id); }); if(id==="logs") loadLogs(); if(id==="merged") loadMerged(); if(id==="connect") loadTokens(); }
+
+function loadAll(){
+  Promise.all([api("/status"), api("/meta")]).then(function(r){
+    STATE.status=r[0]; STATE.meta=r[1]; STATE.authed=true; showLogin(false);
+    renderHeader(); renderOverview(); renderNodes(); renderConnect(); renderDeploy(); renderScale();
+    if(STATE.tab==="logs") loadLogs(); if(STATE.tab==="merged") loadMerged(); if(STATE.tab==="connect") loadTokens();
+  }).catch(function(e){ if(e.message!=="unauthorized") toast("加载失败: "+e.message); });
 }
-async function loadStatus(){
-  try{
-    const st=await api('/api/v1/status');
-    state.status=st;
-    const p=st.pool;
-    $('poolId').textContent=p.id||'pool';
-    $('mHealthy').textContent=p.healthy+' / '+p.count;
-    $('mEnabled').textContent=p.enabled;
-    $('mCount').textContent=p.count;
-    $('mRotation').textContent=p.rotation_interval_seconds+'s';
-    $('mPorts').textContent=(state.meta?state.meta.deploy.port_start:p.mux_port+1)+'-'+(state.meta?state.meta.deploy.port_end:p.mux_port+p.count);
-    const hb=$('healthBadge');
-    hb.textContent=p.healthy>=(p.min_healthy||0)?'healthy':'degraded';
-    hb.className='badge '+(p.healthy>=(p.min_healthy||0)?'ok':'bad');
-    const regions={};
-    for(const n of st.nodes||[]){
-      const loc=n.loc||'-';
-      const r=regions[loc]||(regions[loc]={loc,count:0,healthy:0,prefixes:[]});
-      r.count++;
-      if(n.healthy)r.healthy++;
-      if(n.prefix64&&!r.prefixes.includes(n.prefix64))r.prefixes.push(n.prefix64);
-    }
-    const list=Object.values(regions).sort((a,b)=>b.count-a.count);
-    $('regionBadge').textContent=list.length?list.map(r=>r.loc+' '+r.count).join(' · '):'-';
-    $('mRegions').textContent=list.length?list.map(r=>r.loc).join(', '):'-';
-    $('regionRows').innerHTML=list.length?list.map(r=>'<tr><td>'+esc(r.loc)+'</td><td class="num">'+r.count+'</td><td class="num">'+r.healthy+'</td><td class="mono">'+esc(r.prefixes.slice(0,3).join(', '))+(r.prefixes.length>3?' …':'')+'</td></tr>').join(''):'<tr><td colspan="4" class="muted">暂无节点</td></tr>';
-    renderNodes(st.nodes||[]);
-  }catch(e){toast('状态获取失败: '+e.message,true)}
+function renderHeader(){
+  var s=STATE.status, m=STATE.meta; if(!s||!m) return;
+  var p=s.pool;
+  document.getElementById("poolId").textContent=p.id||"-";
+  var ok=p.healthy>=(p.min_healthy||0)&&p.healthy>0;
+  var hp=document.getElementById("healthPill");
+  hp.textContent="健康 "+p.healthy+" / "+(p.count||0);
+  hp.className="pill "+(ok?"ok":"bad");
+  var rp=document.getElementById("regionPill");
+  rp.textContent=(m.regions||[]).map(function(x){return x.loc+" "+x.count}).join(" · ")||"-";
+  rp.className="pill";
 }
-function renderNodes(nodes){
-  $('nodes').innerHTML=nodes.length?nodes.map(n=>{
-    const cls=!n.enabled?'warn':(n.healthy?'ok':'bad');
-    const st=!n.enabled?'disabled':(n.healthy?'healthy':(n.state||'unknown'));
-    return '<tr>'
-      +'<td class="num">'+n.index+'</td>'
-      +'<td class="mono">'+esc(n.user)+'</td>'
-      +'<td class="num">'+esc(n.port)+'</td>'
-      +'<td><span class="dot '+cls+'"></span>'+esc(st)+'</td>'
-      +'<td class="mono">'+esc(n.exit_ipv6||n.prefix64||'-')+'</td>'
-      +'<td>'+esc(n.loc||'-')+'</td>'
-      +'<td class="mono">'+esc((n.endpoint||'-').replace(/\s+$/,''))+'</td>'
-      +'<td class="num">'+Number(n.connections||0)+'</td>'
-      +'<td class="num">'+fmt(n.bytes_up)+'</td>'
-      +'<td class="num">'+fmt(n.bytes_down)+'</td>'
-      +'<td class="muted">'+ago(n.updated_at)+'</td>'
-      +'<td><div class="row">'
-      +'<button onclick="nodeAction(\''+esc(n.user)+'\',\'rotate\')">轮换</button>'
-      +'<button onclick="nodeAction(\''+esc(n.user)+'\',\''+(n.enabled?'disable':'enable')+'\')">'+(n.enabled?'停用':'启用')+'</button>'
-      +'</div></td></tr>';
-  }).join(''):'<tr><td colspan="12" class="muted">池里还没有节点</td></tr>';
+
+function renderOverview(){
+  var s=STATE.status, m=STATE.meta, p=s.pool;
+  var regions=(m.regions||[]).map(function(r){
+    return "<tr><td><span class=\"tag "+(r.loc==="-"?\"relay\":\"de\")+"\">"+esc(r.loc)+"</span></td><td class=\"mono\">"+r.count+"</td><td class=\"mono\">"+r.healthy+"</td><td class=\"mono\">"+(r.prefixes||[]).map(esc).join(", ")+(r.prefixes&&r.prefixes.length?" …":"")+"</td></tr>";
+  }).join("");
+  var api=m.api||{}, rt=m.runtime||{};
+  var html="";
+  html+="<div class=\"grid\">";
+  html+=stat("健康节点",p.healthy+" / "+(p.count||0));
+  html+=stat("启用节点",p.enabled);
+  html+=stat("节点总数",p.count);
+  html+=stat("地区",(m.regions||[]).map(function(r){return r.loc}).join(", ")||"-");
+  html+=stat("节点端口范围",(m.deploy.port_start||"-")+"-"+m.deploy.port_end);
+  html+=stat("轮换间隔",p.rotation_interval_seconds+"s");
+  html+="</div>";
+
+  html+="<div class=\"card\" style=\"margin-top:16px\"><h2>运行时调参</h2><div class=\"row\">";
+  html+="<label class=\"hint\">轮换间隔（秒）<br><input type=\"text\" id=\"rtRotation\" value=\""+(rt.rotation_interval_seconds||"")+"\" style=\"width:150px\"></label>";
+  html+="<label class=\"hint\">每轮轮换数<br><input type=\"text\" id=\"rtBatch\" value=\""+(rt.reroll_batch||"")+"\" style=\"width:120px\"></label>";
+  html+="<label class=\"hint\">健康检查间隔（秒）<br><input type=\"text\" id=\"rtHealth\" value=\""+(rt.health_interval_seconds||"")+"\" style=\"width:170px\"></label>";
+  html+="<label class=\"hint\">最小健康数<br><input type=\"text\" id=\"rtMin\" value=\""+(rt.min_healthy||"")+"\" style=\"width:130px\"></label>";
+  html+="<button class=\"primary\" onclick=\"saveRuntime()\">保存并热加载</button></div>";
+  html+="<div class=\"hint\" style=\"margin-top:8px\">写入 /data/control/config.json，entrypoint 在下一个循环读取，不需要重启。健康检查间隔决定探活一轮的周期；最小健康数只影响徽标颜色，不影响下发。</div></div>";
+
+  html+="<div class=\"two\">";
+  html+="<div class=\"card\"><h2>区域分布</h2><table><thead><tr><th>地区</th><th>节点数</th><th>健康</th><th>出口 /64 前缀</th></tr></thead><tbody>"+(regions||"<tr><td colspan=\"4\" class=\"muted\">暂无数据</td></tr>")+"</tbody></table>";
+  html+="<div class=\"note\"><b>地区</b>：Cloudflare WARP 的出口地区（探活 trace 的 loc），由 WARP 接入点/容器所在地区决定，与订阅节点无关。<br><b>节点数</b>：wireproxy 实例数；一个实例 = 一个 wgcf 账号 = 一个独立出口 /64。<br><b>出口 /64</b>：该账号的 IPv6 前缀，网关下载的每个 SOCKS 出口都落在其中。<br><b>- 行</b>：中继预留槽位（warpuser 末尾 10 个），池内不启动 wireproxy；它们由中继容器经订阅 UDP 隧道产生，实际出口地区以中继 API 为准（当前 KR）。</div></div>";
+
+  html+="<div class=\"card\"><h2>网关接入（最短路径）</h2>";
+  html+="<div class=\"kv\">";
+  html+="<div class=\"k\">API 地址（私网）</div><div class=\"v\">"+esc(api.private_url||"-")+" <button class=\"small\" onclick=\"copy('"+jsq(api.private_url)+"')\">复制</button></div>";
+  html+="<div class=\"k\">API 地址（公网）</div><div class=\"v\">"+esc(api.public_url||"-")+" <button class=\"small\" onclick=\"copy('"+jsq(api.public_url)+"')\">复制</button></div>";
+  html+="<div class=\"k\">API Token</div><div class=\"v\">••••••••"+(api.token||"").slice(-4)+" <button class=\"small\" onclick=\"copy('"+jsq(api.token)+"')\">复制</button> <button class=\"small\" onclick=\"toggleSecret('gwToken','"+jsq(api.token)+"')\">显示</button></div>";
+  html+="<div class=\"k\">范围</div><div class=\"v\">private <button class=\"small\" onclick=\"copy('private')\">复制</button> / public <button class=\"small\" onclick=\"copy('public')\">复制</button></div>";
+  html+="</div>";
+  html+="<div class=\"note\">同平台网关填私网地址；其它平台的容器（或本地电脑）填公网地址。范围 private/public 决定网关从池里取哪一组 SOCKS 主机名。Token 可在此页下方「连接与鉴权」里新增多个，用不同 Token 给不同容器隔离鉴权。</div></div>";
+  html+="</div>";
+
+  document.getElementById("tab-overview").innerHTML=html;
 }
-async function loadMeta(){
-  try{
-    const m=await api('/api/v1/meta');
-    state.meta=m;
-    renderConnect(m);
-    renderDeploy(m);
-    renderScale(m);
-    if(state.status)loadStatus();
-  }catch(e){toast('元数据获取失败: '+e.message,true)}
+function stat(k,v){ return "<div class=\"stat\"><div class=\"k\">"+k+"</div><div class=\"v\">"+esc(v)+"</div></div>"; }
+function jsq(v){ return String(v==null?"":v).replace(/\\/g,"\\\\").replace(/'/g,"\\'").replace(/\r|\n/g,""); }
+function toggleSecret(id,val){ var el=document.getElementById(id); if(!el){ return; } el.textContent = el.textContent.indexOf("•")>=0 ? val : "••••••••••••"+String(val).slice(-4); }
+
+function saveRuntime(){
+  var body={
+    rotation_interval_seconds:Number(document.getElementById("rtRotation").value||0),
+    reroll_batch:Number(document.getElementById("rtBatch").value||0),
+    health_interval_seconds:Number(document.getElementById("rtHealth").value||0),
+    min_healthy:Number(document.getElementById("rtMin").value||0)
+  };
+  api("/config",{method:"PUT",body:JSON.stringify(body)}).then(function(){ toast("已保存并热加载"); loadAll(); }).catch(function(e){ toast("保存失败: "+e.message); });
 }
-function renderConnect(m){
-  const pub=m.api.public_url||location.origin;
-  const priv=m.api.private_url||'';
-  $('poolIdValue').textContent=m.pool.id||'-';
-  $('apiPrivate').textContent=priv||'(未配置 private_host)';
-  $('apiPublic').textContent=pub;
-  $('apiToken').textContent=state.revealed.apiToken?m.api.token:'••••••••••••'+String(m.api.token||'').slice(-4);
-  $('socksUser').textContent=m.socks.user||'-';
-  $('socksPass').textContent=state.revealed.socksPass?m.socks.pass:'••••••••';
-  $('muxPortValue').textContent=m.socks.mux_port||m.deploy.mux_port||'-';
-  const use=priv||pub;
-  $('ovApi').textContent=use;
-  $('ovToken').textContent=state.revealed.apiToken?m.api.token:'••••••••••••'+String(m.api.token||'').slice(-4);
-  $('gatewayExample').textContent='API 地址: '+use+'\nToken: '+m.api.token+'\n范围: private';
+
+function nodeFiltered(){
+  var nodes=(STATE.status&&STATE.status.nodes)||[];
+  var q=STATE.nodeQuery.trim().toLowerCase();
+  return nodes.filter(function(n){
+    if(STATE.nodeFilter==="reserved" && !n.reserved) return false;
+    if(STATE.nodeFilter==="healthy" && !n.healthy) return false;
+    if(STATE.nodeFilter==="bad" && (n.healthy||n.reserved)) return false;
+    if(!q) return true;
+    return [n.user,n.state,n.loc,n.exit_ipv6,n.prefix64,n.endpoint].join(" ").toLowerCase().indexOf(q)>=0;
+  });
 }
-function renderDeploy(m){
-  const d=m.deploy;
-  const rows=[
-    ['POOL_ID',m.pool.id],['STATE_DIR',d.state_dir],['START_PORT',d.start_port],['INSTANCE_COUNT',d.instance_count],
-    ['INSTANCE_COUNT（env）',d.instance_count_env],['MUX_PORT',d.mux_port],['端口范围',d.port_start+'-'+d.port_end],
-    ['SOCKS_USER',m.socks.user],['REROLL_INTERVAL',d.reroll_interval],['REROLL_BATCH',d.reroll_batch],
-    ['HEALTH_INTERVAL',d.health_interval],['MIN_HEALTHY',d.min_healthy],['DEDUP_RETRIES',d.dedup_retries],
-    ['REGISTER_RETRIES',d.register_retries],['PROBE_URL',d.probe_url],['PROBE_TIMEOUT',d.probe_timeout],
-    ['ENDPOINTS_FILE',d.endpoints_file],['ENDPOINTS_COUNT',d.endpoints_count],['DENY_48_PREFIXES',d.deny_48_prefixes],
-    ['POOL_PUBLIC_HOST',d.pool_public_host||'-'],['POOL_PRIVATE_HOST',d.pool_private_host||'-'],['EXTERNAL_HOST',d.external_host||'-'],
-    ['WGCF_KEEPALIVE',d.keepalive],['SCALE_MIN',d.scale_min],['SCALE_MAX',d.scale_max],
+function renderNodes(){
+  var list=nodeFiltered();
+  var size=STATE.nodePageSize, pages=Math.max(1,Math.ceil(list.length/size));
+  if(STATE.nodePage>pages) STATE.nodePage=pages;
+  var start=(STATE.nodePage-1)*size, page=list.slice(start,start+size);
+  var rows=page.map(function(n){
+    var loc=n.reserved?"<span class=\"tag relay\">中继预留</span>":(n.loc?esc(n.loc):"-");
+    var st=n.healthy?"<span class=\"tag ok\">healthy</span>":(n.state==="ok"?"<span class=\"tag bad\">stale</span>":"<span class=\"tag bad\">"+esc(n.state)+"</span>");
+    return "<tr><td class=\"mono\">"+n.index+"</td><td class=\"mono\">"+esc(n.user)+"</td><td class=\"mono\">"+n.port+"</td><td>"+st+"</td><td class=\"mono\">"+esc(n.exit_ipv6||"-")+"</td><td>"+loc+"</td><td class=\"mono\">"+esc(n.endpoint||"-")+"</td><td class=\"mono\">"+n.connections+"</td><td class=\"mono\">"+fmtBytes(n.bytes_up)+"</td><td class=\"mono\">"+fmtBytes(n.bytes_down)+"</td><td class=\"mono\">"+ago(n.updated_at)+"</td><td><button class=\"small\" onclick=\"actionNode('"+jsq(n.user)+"','reroll')\">轮换</button> <button class=\"small\" onclick=\"actionNode('"+jsq(n.user)+"','disable')\">停用</button></td></tr>";
+  }).join("");
+  var html="";
+  html+="<div class=\"card\"><h2>节点</h2>";
+  html+="<div class=\"toolbar\">";
+  html+="<input type=\"text\" id=\"nodeQ\" placeholder=\"搜索用户 / 前缀 / endpoint\" value=\""+esc(STATE.nodeQuery)+"\" oninput=\"STATE.nodeQuery=this.value;STATE.nodePage=1;renderNodes()\" style=\"max-width:280px\">";
+  html+="<select onchange=\"STATE.nodeFilter=this.value;STATE.nodePage=1;renderNodes()\"><option value=\"all\""+(STATE.nodeFilter==="all"?" selected":"")+">全部</option><option value=\"healthy\""+(STATE.nodeFilter==="healthy"?" selected":"")+">仅健康</option><option value=\"bad\""+(STATE.nodeFilter==="bad"?" selected":"")+">仅异常</option><option value=\"reserved\""+(STATE.nodeFilter==="reserved"?" selected":"")+">中继预留</option></select>";
+  html+="<select onchange=\"STATE.nodePageSize=Number(this.value);STATE.nodePage=1;renderNodes()\"><option"+(STATE.nodePageSize===20?" selected":"")+">20</option><option"+(STATE.nodePageSize===50?" selected":"")+">50</option><option"+(STATE.nodePageSize===100?" selected":"")+">100</option></select>";
+  html+="<span class=\"spacer\"></span><button onclick=\"loadAll()\">刷新</button><button class=\"danger\" onclick=\"rerollAll()\">全部轮换</button></div>";
+  html+="<table><thead><tr><th>#</th><th>用户</th><th>端口</th><th>状态</th><th>出口 IPv6</th><th>地区</th><th>入口 endpoint</th><th>连接</th><th>上行</th><th>下行</th><th>更新时间</th><th>操作</th></tr></thead><tbody>"+(rows||"<tr><td colspan=\"12\" class=\"muted\">没有匹配的节点</td></tr>")+"</tbody></table>";
+  html+="<div class=\"pager\"><span>共 "+list.length+" 条，第 "+STATE.nodePage+" / "+pages+" 页</span><button class=\"small\" onclick=\"pageNode(-1)\" "+(STATE.nodePage<=1?"disabled":"")+">上一页</button><button class=\"small\" onclick=\"pageNode(1)\" "+(STATE.nodePage>=pages?"disabled":"")+">下一页</button></div>";
+  html+="<div class=\"note\"><b>轮换</b>：停掉该节点的 wireproxy，重新注册一个 wgcf 设备并重新握手 WARP，拿到新的出口 /64。连接会瞬断，旧账号被替换；不会换地区。<b>停用</b>：从下发列表里摘掉该节点，账号保留。</div>";
+  html+="</div>";
+  document.getElementById("tab-nodes").innerHTML=html;
+}
+function pageNode(d){ STATE.nodePage+=d; renderNodes(); }
+function actionNode(user,action){
+  api("/nodes/"+encodeURIComponent(user)+"/"+action,{method:"POST"}).then(function(){ toast("已排队: "+user+" "+action); setTimeout(loadAll,1200); }).catch(function(e){ toast("操作失败: "+e.message); });
+}
+function rerollAll(){ if(!confirm("轮换全部节点会让所有 SOCKS 出口瞬断，确认？")) return; api("/reroll",{method:"POST"}).then(function(){ toast("已排队全部轮换"); setTimeout(loadAll,1500); }).catch(function(e){ toast("失败: "+e.message); }); }
+
+function renderConnect(){
+  var m=STATE.meta, s=STATE.status; if(!m||!s) return;
+  var api=m.api||{}, socks=m.socks||{}, d=m.deploy||{};
+  var html="";
+  html+="<div class=\"two\">";
+  html+="<div class=\"card\"><h2>连接信息</h2><div class=\"kv\">";
+  html+=kvRow("Pool ID",d.pool_id||s.pool.id);
+  html+=kvRow("API 地址（私网）",api.private_url);
+  html+=kvRow("API 地址（公网）",api.public_url);
+  html+=kvRow("默认 API Token",api.token);
+  html+=kvRow("SOCKS 用户",socks.user);
+  html+=kvRow("SOCKS 密码",socks.pass);
+  html+=kvRow("Mux 端口",socks.mux_port);
+  html+="</div><div class=\"note\">控制台登录（用户名/密码）与 API Token 是两套鉴权：登录只给这个网页用，Token 给网关/脚本用。SOCKS 密码用于直连 mux 的客户端；网关同步端点时会自动带上。</div></div>";
+  html+="<div class=\"card\"><h2>填到网关静态池</h2><pre style=\"max-height:none\">API 地址: "+esc(api.private_url||api.public_url)+"\nToken: "+esc(api.token)+"\n范围: private</pre>";
+  html+="<div class=\"row\" style=\"margin-top:10px\"><button onclick=\"copyGateway()\">复制接入信息</button></div>";
+  html+="<div class=\"note\">同平台（例如 FRA 网关 + 同项目池）用私网地址；跨平台或本地电脑用公网地址。范围 private/public 决定网关从池里取哪一组 SOCKS 主机名。</div></div>";
+  html+="</div>";
+
+  html+="<div class=\"card\"><h2>Token 管理</h2><div class=\"hint\">为不同容器/团队各发一个 Token，并发调用时互不共享，删掉一个不影响其它网关。默认 Token 由容器环境变量 API_TOKEN 固定，不能在这里修改。</div>";
+  html+="<div class=\"row\" style=\"margin-top:12px\"><input type=\"text\" id=\"tokName\" placeholder=\"名称（例如 gateway-fra）\" style=\"flex:1 1 200px\"><input type=\"text\" id=\"tokVal\" placeholder=\"自定义 Token（留空自动生成）\" style=\"flex:2 1 260px\"><button class=\"primary\" onclick=\"addToken()\">新增 Token</button></div>";
+  html+="<div id=\"tokenList\" style=\"margin-top:14px\">加载中…</div></div>";
+  document.getElementById("tab-connect").innerHTML=html;
+  loadTokens();
+}
+function kvRow(k,v){ return "<div class=\"k\">"+esc(k)+"</div><div class=\"v\">"+esc(v==null||v===""?"-":v)+" <button class=\"small\" onclick=\"copy('"+jsq(v)+"')\">复制</button></div>"; }
+function copyGateway(){ var m=STATE.meta, api=m.api||{}; copy("API 地址: "+(api.private_url||api.public_url)+"\nToken: "+api.token+"\n范围: private"); }
+
+function loadTokens(){
+  if(!STATE.tab || STATE.tab!=="connect") { /* prefetch ok */ }
+  api("/tokens").then(function(d){ STATE.tokens=d; renderTokens(); }).catch(function(e){ var el=document.getElementById("tokenList"); if(el) el.innerHTML="<span class=\"muted\">读取失败: "+esc(e.message)+"</span>"; });
+}
+function renderTokens(){
+  var d=STATE.tokens; if(!d) return; var el=document.getElementById("tokenList"); if(!el) return;
+  var rows="";
+  if(d.legacy){ rows+="<tr><td>"+esc(d.legacy.name)+"</td><td class=\"mono\">"+esc(d.legacy.suffix)+"</td><td class=\"muted\">固定</td><td><span class=\"tag\">默认</span></td></tr>"; }
+  (d.tokens||[]).forEach(function(t){
+    rows+="<tr><td>"+esc(t.name)+"</td><td class=\"mono\">"+esc(String(t.token).slice(-4))+"</td><td class=\"muted\">"+new Date(t.created_at*1000).toLocaleString()+"</td><td><button class=\"small\" onclick=\"copy('"+jsq(t.token)+"')\">复制</button> <button class=\"small\" onclick=\"renameToken('"+jsq(t.id)+"')\">改名</button> <button class=\"small danger\" onclick=\"delToken('"+jsq(t.id)+"')\">删除</button></td></tr>";
+  });
+  el.innerHTML="<table><thead><tr><th>名称</th><th>Token 尾号</th><th>创建时间</th><th>操作</th></tr></thead><tbody>"+(rows||"<tr><td colspan=\"4\" class=\"muted\">还没有自定义 Token</td></tr>")+"</tbody></table>";
+}
+function addToken(){
+  var name=document.getElementById("tokName").value, token=document.getElementById("tokVal").value;
+  api("/tokens",{method:"POST",body:JSON.stringify({name:name,token:token})}).then(function(e){
+    document.getElementById("tokName").value=""; document.getElementById("tokVal").value="";
+    toast("已新增: "+e.name+"（可复制）");
+    copy(e.token);
+    loadTokens();
+  }).catch(function(err){ toast("新增失败: "+err.message); });
+}
+function renameToken(id){ var name=prompt("新名称"); if(!name) return; api("/tokens/"+encodeURIComponent(id),{method:"PATCH",body:JSON.stringify({name:name})}).then(loadTokens).catch(function(e){toast("改名失败: "+e.message)}); }
+function delToken(id){ if(!confirm("删除这个 Token？使用它的容器会立刻失效。")) return; api("/tokens/"+encodeURIComponent(id),{method:"DELETE"}).then(loadTokens).catch(function(e){toast("删除失败: "+e.message)}); }
+
+function renderDeploy(){
+  var m=STATE.meta; if(!m) return; var d=m.deploy||{};
+  var rows=[
+    ["POOL_ID",d.pool_id,"池标识，网关展示用"],
+    ["STATE_DIR",d.state_dir,"数据目录：实例、账号、control、status.tsv 都在这里"],
+    ["START_PORT",d.start_port,"第一个 wireproxy SOCKS 端口"],
+    ["INSTANCE_COUNT",d.instance_count,"当前节点数（含中继预留槽位）"],
+    ["INSTANCE_COUNT (env)",d.instance_count_env,"容器环境变量里的初始节点数；运行时扩容不改它"],
+    ["MUX_PORT",d.mux_port,"对外 mux 端口，网关只连这个端口"],
+    ["端口范围",(d.port_start||"-")+"-"+(d.port_end||"-"),"wireproxy 端口区间"],
+    ["SOCKS_USER",d.socks_user,"上游 SOCKS 用户名前缀，节点用 user01..userNN"],
+    ["REROLL_INTERVAL",d.reroll_interval,"轮换间隔秒数：每轮重新注册多少节点的账号"],
+    ["REROLL_BATCH",d.reroll_batch,"每轮轮换的节点数"],
+    ["HEALTH_INTERVAL",d.health_interval,"探活周期秒数；决定 15 分钟健康窗口内能覆盖多少节点"],
+    ["MIN_HEALTHY",d.min_healthy,"徽标转绿所需的最小健康节点数"],
+    ["DEDUP_RETRIES",d.dedup_retries,"拿到重复 /64 时的重注册次数"],
+    ["REGISTER_RETRIES",d.register_retries,"wgcf 注册尝试次数"],
+    ["PROBE_URL",d.probe_url,"探活地址，返回 trace 里的 ip/loc"],
+    ["PROBE_TIMEOUT",d.probe_timeout,"单次探活超时秒数"],
+    ["ENDPOINTS_FILE",d.endpoints_file,"WARP 入口 anycast 候选文件"],
+    ["ENDPOINTS_COUNT",d.endpoints_count,"候选入口数量"],
+    ["DENY_48_PREFIXES",d.deny_48_prefixes||"(空)","拒绝的 /48 前缀"],
+    ["POOL_PUBLIC_HOST",d.pool_public_host,"公网主机名，写进网关的 public 范围"],
+    ["POOL_PRIVATE_HOST",d.pool_private_host,"私网主机名，写进网关的 private 范围"],
+    ["EXTERNAL_HOST",d.external_host||"(空)","外部主机名，部署在别的平台时填"],
+    ["WGCF_KEEPALIVE",d.keepalive,"WireGuard 保活秒数"],
+    ["SCALE_MIN / MAX",d.scale_min+" / "+d.scale_max,"运行时可调节点数的范围"],
+    ["中继预留",d.relay_slots+" 个","末尾节点由中继容器使用，不参与池下发"],
+    ["控制台账号",d.admin_user,"POOL_ADMIN_USER，登录这个网页用"]
   ];
-  $('deployRows').innerHTML=rows.map(r=>'<tr><td class="mono">'+esc(r[0])+'</td><td class="mono">'+esc(r[1])+'</td></tr>').join('');
-  const env={POOL_ID:m.pool.id+'-REGION',STATE_DIR:d.state_dir,START_PORT:d.start_port,MUX_PORT:d.mux_port,INSTANCE_COUNT:d.instance_count,SOCKS_USER:m.socks.user,SOCKS_PASS:m.socks.pass,API_TOKEN:m.api.token,REROLL_INTERVAL:d.reroll_interval,REROLL_BATCH:d.reroll_batch,HEALTH_INTERVAL:d.health_interval,MIN_HEALTHY:d.min_healthy,DEDUP_RETRIES:d.dedup_retries,REGISTER_RETRIES:d.register_retries,PROBE_URL:d.probe_url,PROBE_TIMEOUT:d.probe_timeout,ENDPOINTS_FILE:d.endpoints_file,DENY_48_PREFIXES:d.deny_48_prefixes,POOL_PUBLIC_HOST:'NEW_POOL_HOST',POOL_PRIVATE_HOST:'NEW_POOL_PRIVATE_HOST'};
-  $('deployJson').textContent=JSON.stringify(env,null,2);
+  var tr=rows.map(function(r){ return "<tr><td class=\"mono\">"+esc(r[0])+"</td><td class=\"mono\">"+esc(r[1])+"</td><td class=\"muted\">"+esc(r[2])+"</td></tr>"; }).join("");
+  var env={POOL_ID:d.pool_id+"-REGION",STATE_DIR:d.state_dir,START_PORT:d.start_port,MUX_PORT:d.mux_port,INSTANCE_COUNT:d.instance_count_env,SOCKS_USER:d.socks_user,SOCKS_PASS:"WarpPass2026",API_TOKEN:"<新池 Token>",REROLL_INTERVAL:d.reroll_interval,REROLL_BATCH:d.reroll_batch,HEALTH_INTERVAL:d.health_interval,MIN_HEALTHY:d.min_healthy,DEDUP_RETRIES:d.dedup_retries,REGISTER_RETRIES:d.register_retries,PROBE_URL:d.probe_url,PROBE_TIMEOUT:d.probe_timeout,ENDPOINTS_FILE:d.endpoints_file,POOL_PUBLIC_HOST:"<新池公网主机名>",POOL_PRIVATE_HOST:"<新池私网主机名>"};
+  var html="";
+  html+="<div class=\"card\"><h2>部署参数</h2><table><thead><tr><th>参数</th><th>当前值</th><th>含义</th></tr></thead><tbody>"+tr+"</tbody></table></div>";
+  html+="<div class=\"card\"><h2>部署 env（JSON）</h2><pre>"+esc(JSON.stringify(env,null,2))+"</pre><div class=\"note\">这些是容器启动参数。改 INSTANCE_COUNT / START_PORT 后需要重新部署才会改变启动规模；运行中扩缩容请用「扩容与区域」页。</div></div>";
+  document.getElementById("tab-deploy").innerHTML=html;
 }
-function renderScale(m){
-  const d=m.deploy;
-  $('scaleCurrent').textContent=d.instance_count+' 个（env '+d.instance_count_env+'）';
-  $('scalePorts').textContent=d.port_start+'-'+d.port_end;
-  $('scaleMux').textContent=d.mux_port;
-  const regions=(state.status&&state.status.nodes||[]).map(n=>n.loc).filter(Boolean);
-  const uniq=[...new Set(regions)];
-  $('scaleRegion').textContent=uniq.length?uniq.join(', '):'-';
-  $('scaleCount').value=d.instance_count;
-  $('scaleCount').max=d.scale_max;
-  if(!$('deployEnv').dataset.ready){
-    $('deployEnv').textContent=JSON.stringify({POOL_ID:m.pool.id+'-REGION',STATE_DIR:d.state_dir,START_PORT:d.start_port,MUX_PORT:d.mux_port,INSTANCE_COUNT:d.instance_count,SOCKS_USER:m.socks.user,SOCKS_PASS:m.socks.pass,API_TOKEN:m.api.token,REROLL_INTERVAL:d.reroll_interval,REROLL_BATCH:d.reroll_batch,HEALTH_INTERVAL:d.health_interval,MIN_HEALTHY:d.min_healthy,PROBE_URL:d.probe_url,PROBE_TIMEOUT:d.probe_timeout,ENDPOINTS_FILE:d.endpoints_file,DENY_48_PREFIXES:d.deny_48_prefixes,POOL_PUBLIC_HOST:'NEW_POOL_HOST',POOL_PRIVATE_HOST:'NEW_POOL_PRIVATE_HOST'},null,2);
-    $('deployEnv').dataset.ready='1';
-  }
+
+function renderScale(){
+  var m=STATE.meta; if(!m) return; var d=m.deploy||{};
+  var eps=(m.endpoints&&m.endpoints.items)||[];
+  var html="";
+  html+="<div class=\"two\">";
+  html+="<div class=\"card\"><h2>在线扩缩容</h2><div class=\"kv\">"+kvRow("当前节点数",d.instance_count+" 个（env "+d.instance_count_env+"）")+kvRow("节点端口范围",(d.port_start||"-")+"-"+(d.port_end||"-"))+kvRow("Mux 端口",d.mux_port)+"</div>";
+  html+="<div class=\"row\" style=\"margin-top:12px\"><input type=\"text\" id=\"scaleCount\" value=\""+esc(d.instance_count)+"\" style=\"max-width:160px\"><button class=\"primary\" onclick=\"applyScale()\">应用扩缩容</button></div>";
+  html+="<div class=\"note\">扩容会启动新 wireproxy 并重启 mux，API 和 SOCKS 会中断几秒；已注册账号保留。缩容会停掉尾部节点（中继预留槽位在最后，缩容前先确认不要压到它们）。目标值持久化到 /data/control/scale，重启后仍生效。</div></div>";
+  html+="<div class=\"card\"><h2>换地区 / 多池</h2><div class=\"note\" style=\"margin-top:0\">WARP 是 Anycast：出口地区由池容器所在地区决定（当前 "+(m.regions||[]).map(function(r){return r.loc}).join(", ")+"），改节点数不会换地区。<br>要覆盖更多地区，在目标地区再部署一个同样的池服务，设置不同的 POOL_ID、STATE_DIR（或独立卷）和端口，然后把它的 API 地址 + token 加到网关静态池。网关会合并去重所有启用池的端点。</div>";
+  html+="<div class=\"row\" style=\"margin-top:10px\"><button onclick=\"copyNewPoolEnv()\">复制新池部署 env</button></div></div>";
+  html+="</div>";
+  html+="<div class=\"card\"><h2>WARP 入口 endpoint 候选</h2><div class=\"hint\">每个节点从下列 Cloudflare Anycast 地址里随机选一个入口；换 endpoint 只影响入口，不改变出口地区。</div><pre style=\"margin-top:10px\">"+eps.map(esc).join("  ")+"</pre></div>";
+  document.getElementById("tab-scale").innerHTML=html;
 }
-function renderEndpointPills(items){
-  const host=$('endpointPills');
-  host.innerHTML=(items||[]).map(x=>'<span class="pill mono">'+esc(x)+'</span>').join('')||'<span class="muted">没有读取到 endpoint 文件</span>';
+function applyScale(){
+  var n=Number(document.getElementById("scaleCount").value||0);
+  api("/scale",{method:"POST",body:JSON.stringify({count:n})}).then(function(){ toast("已排队扩缩容到 "+n); setTimeout(loadAll,1500); }).catch(function(e){ toast("失败: "+e.message); });
 }
-async function loadEndpoints(){
-  try{
-    const m=state.meta||await api('/api/v1/meta');
-    renderEndpointPills(m.endpoints.items);
-  }catch(e){$('endpointPills').innerHTML='<span class="muted">读取失败: '+esc(e.message)+'</span>'}
+function copyNewPoolEnv(){
+  var m=STATE.meta,d=m.deploy||{};
+  var env={POOL_ID:d.pool_id+"-REGION",STATE_DIR:d.state_dir,START_PORT:d.start_port,MUX_PORT:d.mux_port,INSTANCE_COUNT:d.instance_count_env,SOCKS_USER:d.socks_user,SOCKS_PASS:"WarpPass2026",API_TOKEN:"<新池 Token>",REROLL_INTERVAL:d.reroll_interval,REROLL_BATCH:d.reroll_batch,HEALTH_INTERVAL:d.health_interval,MIN_HEALTHY:d.min_healthy,DEDUP_RETRIES:d.dedup_retries,REGISTER_RETRIES:d.register_retries,PROBE_URL:d.probe_url,PROBE_TIMEOUT:d.probe_timeout,ENDPOINTS_FILE:d.endpoints_file,POOL_PUBLIC_HOST:"<新池公网主机名>",POOL_PRIVATE_HOST:"<新池私网主机名>"};
+  copy(JSON.stringify(env,null,2));
 }
-async function loadConfig(){
-  try{
-    const c=await api('/api/v1/config');
-    $('cfgRotation').value=c.rotation_interval_seconds;
-    $('cfgBatch').value=c.reroll_batch;
-    $('cfgHealth').value=c.health_interval_seconds;
-    $('cfgMin').value=c.min_healthy;
-  }catch(e){toast('参数获取失败: '+e.message,true)}
+
+function loadLogs(){
+  var lines=(document.getElementById("logLines")&&document.getElementById("logLines").value)||"200";
+  api("/logs?lines="+encodeURIComponent(lines)).then(function(d){
+    var el=document.getElementById("logPre"); if(!el) return;
+    if(typeof d==="string"){ el.textContent=d||"(空)"; return; }
+    el.textContent=(d&&d.lines||[]).join("\n")||"(空)";
+  }).catch(function(e){ var el=document.getElementById("logPre"); if(el) el.textContent="读取失败: "+e.message; });
 }
-async function loadLogs(){
-  try{ $('logs').textContent=await api('/api/v1/logs?lines='+$('logLines').value) }
-  catch(e){ $('logs').textContent='错误: '+e.message }
+function renderLogsStatic(){
+  var html="<div class=\"card\"><h2>日志</h2><div class=\"toolbar\"><select id=\"logLines\" onchange=\"loadLogs()\"><option>200</option><option>500</option><option>1000</option></select><button onclick=\"loadLogs()\">刷新</button></div><pre id=\"logPre\">加载中…</pre></div>";
+  document.getElementById("tab-logs").innerHTML=html;
 }
-async function loadMerged(fresh){
-  try{
-    const s=await api('/api/v1/merged-status'+(fresh?'?fresh=1':''));
-    $('mgUnique').textContent=s.unique64;
-    $('mgEndpoints').textContent=s.endpoints;
-    $('mgUpstreams').textContent=(s.upstreams||[]).length;
-    $('mgRows').innerHTML=(s.upstreams||[]).map(u=>'<tr><td class="mono">'+esc(u.name)+'</td><td><span class="dot '+(u.ok?'ok':'bad')+'"></span>'+(u.ok?'ok':'fail')+'</td><td class="num">'+u.nodes_total+'</td><td class="num">'+u.nodes_ok+'</td><td class="num">'+u.unique64+'</td><td class="num">'+u.latency_ms+'ms</td><td class="muted small">'+esc(u.error||'-')+'</td></tr>').join('')||'<tr><td colspan="7" class="muted">没有配置上游池</td></tr>';
-    $('mgEndpointsText').textContent=(s.nodes||[]).map(n=>n.url).join('\n')||'(空)';
-  }catch(e){
-    $('mgRows').innerHTML='<tr><td colspan="7" class="muted">'+esc(e.message)+'</td></tr>';
-    $('mgEndpointsText').textContent='(不可用)';
-  }
+function loadMerged(){
+  var el=document.getElementById("mergedPre");
+  api("/merged-status?fresh=1").then(function(d){ if(el) el.textContent=JSON.stringify(d,null,2); }).catch(function(e){ if(el) el.textContent="读取失败: "+e.message; });
 }
-function toggleSecret(key){
-  state.revealed[key]=!state.revealed[key];
-  if(state.meta)renderConnect(state.meta);
+function renderMergedStatic(){
+  var html="<div class=\"card\"><h2>多池聚合</h2><div class=\"hint\">这里汇总本池与上游池（例如中继容器）的状态；网关同步端点时会把所有启用池合并去重。</div><div class=\"row\" style=\"margin-top:10px\"><button onclick=\"loadMerged()\">刷新</button></div><pre id=\"mergedPre\" style=\"margin-top:10px\">加载中…</pre></div>";
+  document.getElementById("tab-merged").innerHTML=html;
 }
-function copyVal(id){
-  const text=$(id).textContent||'';
-  navigator.clipboard.writeText(text).then(()=>toast('已复制'),()=>toast('复制失败',true));
-}
-function copySecret(key){
-  if(!state.meta)return;
-  const v=key==='apiToken'?state.meta.api.token:state.meta.socks.pass;
-  navigator.clipboard.writeText(v||'').then(()=>toast('已复制'),()=>toast('复制失败',true));
-}
-async function post(path){
-  try{await api(path,{method:'POST'});toast('已排队');setTimeout(loadStatus,1500)}
-  catch(e){toast('失败: '+e.message,true)}
-}
-function nodeAction(user,action){post('/api/v1/nodes/'+encodeURIComponent(user)+'/'+action)}
-async function saveConfig(){
-  const body={rotation_interval_seconds:+$('cfgRotation').value,reroll_batch:+$('cfgBatch').value,health_interval_seconds:+$('cfgHealth').value,min_healthy:+$('cfgMin').value};
-  try{await api('/api/v1/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});toast('已保存并热加载');loadAll()}
-  catch(e){toast('保存失败: '+e.message,true)}
-}
-async function applyScale(){
-  const count=Number($('scaleCount').value);
-  if(!Number.isInteger(count)||count<1||count>1024){toast('节点数需为 1-1024 的整数',true);return}
-  if(!confirm('扩缩容会重启 mux，API 和 SOCKS 会中断几秒。继续？'))return;
-  try{
-    await api('/api/v1/scale',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({count})});
-    toast('已提交扩缩容，等待 mux 重启');
-    setTimeout(loadAll,5000);
-  }catch(e){
-    if(String(e.message).includes('登录已失效'))return;
-    toast('提交失败: '+e.message,true);
-  }
-}
-(function boot(){
-  if(!token){showLogin();return}
-  api('/api/v1/status').then(()=>{showApp();return loadAll()}).catch(()=>showLogin());
-  clearInterval(timer);
-  timer=setInterval(()=>{if(token&&!$('appView').classList.contains('hidden'))loadStatus()},5000);
-})();
+
+renderNav();
+renderLogsStatic();
+renderMergedStatic();
+document.getElementById("tab-overview").classList.add("active");
+loadAll();
+setInterval(function(){ if(STATE.authed && STATE.tab!=="logs"){ api("/status").then(function(s){ STATE.status=s; renderHeader(); if(STATE.tab==="overview") renderOverview(); if(STATE.tab==="nodes") renderNodes(); }).catch(function(){}); } }, 15000);
 </script>
 </body>
-</html>`
+</html>
+`

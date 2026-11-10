@@ -49,7 +49,7 @@ func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 func main() {
 	var m mux
 	var apiToken, stateDir, publicHost, privateHost, poolID, upstreamsFile string
-	var rotation, batch, health, minHealthy, muxPort int
+	var rotation, batch, health, minHealthy, muxPort, relaySlots int
 	flag.StringVar(&m.listen, "listen", "0.0.0.0:1081", "listen address")
 	flag.StringVar(&m.backendHost, "backend-host", "127.0.0.1", "wireproxy host")
 	flag.IntVar(&m.basePort, "base-port", 1082, "first backend port")
@@ -68,6 +68,7 @@ func main() {
 	flag.IntVar(&health, "health-interval", 300, "default health probe interval seconds")
 	flag.IntVar(&minHealthy, "min-healthy", 14, "default minimum healthy nodes")
 	flag.IntVar(&muxPort, "mux-port", 0, "advertised mux port (default: listen port)")
+	flag.IntVar(&relaySlots, "relay-slots", 0, "reserved tail nodes used by the relay external mux (excluded from pool exports)")
 	flag.Parse()
 
 	if m.upPass == "" || m.clientPass == "" {
@@ -106,6 +107,7 @@ func main() {
 			Batch:       batch,
 			Health:      health,
 			MinHealthy:  minHealthy,
+			RelaySlots:  relaySlots,
 		})
 		go m.api.serve()
 		log.Printf("management API enabled on %s (state dir %s)", m.listen, stateDir)

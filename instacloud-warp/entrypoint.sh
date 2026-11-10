@@ -737,11 +737,13 @@ start_mux() {
     return 0
   fi
   log "starting socks mux on ${MUX_LISTEN}:${MUX_PORT} -> 127.0.0.1:${START_PORT}-${last_port} (count=${mux_count})"
+  local relay_slots=$((mux_count - INSTANCE_COUNT))
   /usr/local/bin/socksmux \
     -listen "${MUX_LISTEN}:${MUX_PORT}" \
     -backend-host 127.0.0.1 \
     -base-port "$START_PORT" \
     -count "$mux_count" \
+    -relay-slots "$relay_slots" \
     -upstream-user "$SOCKS_USER" \
     -upstream-pass "$SOCKS_PASS" \
     -client-pass "$SOCKS_PASS" \

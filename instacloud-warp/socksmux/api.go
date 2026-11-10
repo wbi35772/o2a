@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,12 +30,17 @@ type apiOptions struct {
 	Health        int
 	MinHealthy    int
 	UpstreamsFile string
+	RelaySlots    int
 }
 
 type apiServer struct {
 	m           *mux
 	stateDir    string
 	token       string
+	tokens      *tokenStore
+	adminUser   string
+	adminPass   string
+	sessionKey  []byte
 	poolID      string
 	publicHost  string
 	privateHost string
@@ -46,6 +50,7 @@ type apiServer struct {
 	batch       int
 	health      int
 	minHealthy  int
+	relaySlots  int
 	hub         *mergedHub
 	ln          *connListener
 }
@@ -67,6 +72,7 @@ type nodeView struct {
 	State       string `json:"state"`
 	Healthy     bool   `json:"healthy"`
 	Enabled     bool   `json:"enabled"`
+	Reserved    bool   `json:"reserved,omitempty"`
 	ExitIPv6    string `json:"exit_ipv6,omitempty"`
 	Prefix64    string `json:"prefix64,omitempty"`
 	Loc         string `json:"loc,omitempty"`
@@ -137,6 +143,8 @@ type metaDeploy struct {
 	PortEnd          int    `json:"port_end"`
 	ScaleMin         int    `json:"scale_min"`
 	ScaleMax         int    `json:"scale_max"`
+	AdminUser        string `json:"admin_user"`
+	RelaySlots       int    `json:"relay_slots"`
 }
 
 type metaEndpoints struct {
@@ -215,10 +223,16 @@ func newAPIServer(m *mux, o apiOptions) *apiServer {
 	if user == "" {
 		user = m.upUser
 	}
+	adminUser := envString("POOL_ADMIN_USER", "admin")
+	adminPass := envString("POOL_ADMIN_PASSWORD", "WarpPass2026")
 	return &apiServer{
 		m:           m,
 		stateDir:    o.StateDir,
 		token:       o.Token,
+		tokens:      newTokenStore(o.StateDir, o.Token),
+		adminUser:   adminUser,
+		adminPass:   adminPass,
+		sessionKey:  sessionKey(adminUser, adminPass, o.Token),
 		poolID:      o.PoolID,
 		publicHost:  o.PublicHost,
 		privateHost: o.PrivateHost,
@@ -228,6 +242,7 @@ func newAPIServer(m *mux, o apiOptions) *apiServer {
 		batch:       o.Batch,
 		health:      o.Health,
 		minHealthy:  o.MinHealthy,
+		relaySlots:  o.RelaySlots,
 		hub:         newMergedHub(o.StateDir, o.UpstreamsFile, user, func(upstreamSpec) string { return m.clientPass }),
 		ln:          newConnListener(nil),
 	}
@@ -237,6 +252,8 @@ func (a *apiServer) serve() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleUI)
 	mux.HandleFunc("/healthz", a.handleHealth)
+	mux.HandleFunc("/api/v1/login", a.handleLogin)
+	mux.HandleFunc("/api/v1/logout", a.handleLogout)
 	mux.HandleFunc("/api/v1/", a.auth(a.handleAPI))
 	srv := &http.Server{
 		Handler:           mux,
@@ -264,12 +281,12 @@ func (a *apiServer) auth(next http.HandlerFunc) http.HandlerFunc {
 		if tok == "" {
 			tok = r.Header.Get("X-API-Token")
 		}
-		if subtle.ConstantTimeCompare([]byte(tok), []byte(a.token)) != 1 {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeErr(w, http.StatusUnauthorized, "unauthorized")
+		if a.tokens.matches(tok) || a.validSession(r) {
+			next(w, r)
 			return
 		}
-		next(w, r)
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeErr(w, http.StatusUnauthorized, "unauthorized")
 	}
 }
 
@@ -300,6 +317,10 @@ func (a *apiServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.handleEndpoints(w, r)
+	case path == "/api/v1/tokens":
+		a.handleTokens(w, r)
+	case strings.HasPrefix(path, "/api/v1/tokens/"):
+		a.handleTokenItem(w, r, strings.TrimPrefix(path, "/api/v1/tokens/"))
 	case path == "/api/v1/merged-status":
 		a.handleMergedStatus(w, r)
 	case path == "/api/v1/merged-endpoints":
@@ -391,7 +412,9 @@ func (a *apiServer) handleMeta(w http.ResponseWriter, r *http.Request) {
 	regionIndex := map[string]int{}
 	for _, node := range st.Nodes {
 		loc := strings.TrimSpace(node.Loc)
-		if loc == "" {
+		if node.Reserved {
+			loc = "-"
+		} else if loc == "" {
 			loc = "unknown"
 		}
 		pos, ok := regionIndex[loc]
@@ -454,6 +477,8 @@ func (a *apiServer) handleMeta(w http.ResponseWriter, r *http.Request) {
 		PortEnd:          a.m.basePort + a.m.count - 1,
 		ScaleMin:         1,
 		ScaleMax:         scaleMax,
+		AdminUser:        a.adminUser,
+		RelaySlots:       a.relaySlots,
 	}
 	writeJSON(w, http.StatusOK, metaResponse{
 		Pool:      st.Pool,
@@ -512,11 +537,14 @@ func (a *apiServer) status() statusResponse {
 		}
 		isEnabled := !disabled[user]
 		isHealthy := isEnabled && state == "ok" && now-st.Updated <= fresh
-		if isHealthy {
-			healthy++
-		}
-		if isEnabled {
-			enabled++
+		reserved := a.relaySlots > 0 && i >= a.m.count-a.relaySlots
+		if !reserved {
+			if isHealthy {
+				healthy++
+			}
+			if isEnabled {
+				enabled++
+			}
 		}
 		n := nodeView{
 			User:      user,
@@ -525,6 +553,7 @@ func (a *apiServer) status() statusResponse {
 			State:     state,
 			Healthy:   isHealthy,
 			Enabled:   isEnabled,
+			Reserved:  reserved,
 			Prefix64:  st.Prefix,
 			Loc:       st.Loc,
 			Endpoint:  st.Endpoint,
@@ -589,7 +618,7 @@ func (a *apiServer) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 	endpoints := make([]endpoint, 0, len(st.Nodes))
 	lines := make([]string, 0, len(st.Nodes))
 	for _, n := range st.Nodes {
-		if !n.Enabled || n.State != "ok" {
+		if n.Reserved || !n.Enabled || n.State != "ok" {
 			continue
 		}
 		port := a.muxPort
