@@ -59,8 +59,9 @@ COPY --from=build /out/sing-box /usr/local/bin/sing-box
 COPY endpoints.txt /usr/local/share/warp-pool/endpoints.txt
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY relay-entrypoint.sh /usr/local/bin/relay-entrypoint.sh
+COPY relay-watchdog.sh /usr/local/bin/relay-watchdog.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck.sh
-RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/relay-entrypoint.sh /usr/local/bin/healthcheck.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/relay-entrypoint.sh /usr/local/bin/relay-watchdog.sh /usr/local/bin/healthcheck.sh
 
 ENV STATE_DIR=/data \
     START_PORT=1081 \

@@ -290,6 +290,7 @@ render_config() {
         private_key: $priv,
         peers: [{
           address: $peerhost, port: $peerport, public_key: $peerpub,
+          persistent_keepalive_interval: 25,
           allowed_ips: ["::/0"]
         }],
         mtu: 1280,

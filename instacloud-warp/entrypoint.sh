@@ -896,6 +896,10 @@ main() {
   deny_summary
   write_egress
   print_egress_block
+  if [[ -x /usr/local/bin/relay-watchdog.sh ]] && ! pgrep -f 'watchdog\.sh' >/dev/null 2>&1; then
+    log "starting relay watchdog"
+    setsid /usr/local/bin/relay-watchdog.sh >>"$STATE_DIR/relay-watchdog.log" 2>&1 &
+  fi
 
   next_reroll=$(($(date +%s) + REROLL_INTERVAL))
   local next_health
