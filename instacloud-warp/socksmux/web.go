@@ -195,7 +195,7 @@ function renderHeader(){
 function renderOverview(){
   var s=STATE.status, m=STATE.meta, p=s.pool;
   var regions=(m.regions||[]).map(function(r){
-    return "<tr><td><span class=\"tag "+(r.loc==="-"?\"relay\":\"de\")+"\">"+esc(r.loc)+"</span></td><td class=\"mono\">"+r.count+"</td><td class=\"mono\">"+r.healthy+"</td><td class=\"mono\">"+(r.prefixes||[]).map(esc).join(", ")+(r.prefixes&&r.prefixes.length?" …":"")+"</td></tr>";
+    return "<tr><td><span class=\"tag "+(r.loc==="-"?"relay":"de")+"\">"+esc(r.loc)+"</span></td><td class=\"mono\">"+r.count+"</td><td class=\"mono\">"+r.healthy+"</td><td class=\"mono\">"+(r.prefixes||[]).map(esc).join(", ")+(r.prefixes&&r.prefixes.length?" …":"")+"</td></tr>";
   }).join("");
   var api=m.api||{}, rt=m.runtime||{};
   var html="";
@@ -342,14 +342,14 @@ function delToken(id){ if(!confirm("删除这个 Token？使用它的容器会�
 function renderDeploy(){
   var m=STATE.meta; if(!m) return; var d=m.deploy||{};
   var rows=[
-    ["POOL_ID",d.pool_id,"池标识，网关展示用"],
+    ["POOL_ID",(m.pool&&m.pool.id)||"-","池标识，网关展示用"],
     ["STATE_DIR",d.state_dir,"数据目录：实例、账号、control、status.tsv 都在这里"],
     ["START_PORT",d.start_port,"第一个 wireproxy SOCKS 端口"],
     ["INSTANCE_COUNT",d.instance_count,"当前节点数（含中继预留槽位）"],
     ["INSTANCE_COUNT (env)",d.instance_count_env,"容器环境变量里的初始节点数；运行时扩容不改它"],
     ["MUX_PORT",d.mux_port,"对外 mux 端口，网关只连这个端口"],
     ["端口范围",(d.port_start||"-")+"-"+(d.port_end||"-"),"wireproxy 端口区间"],
-    ["SOCKS_USER",d.socks_user,"上游 SOCKS 用户名前缀，节点用 user01..userNN"],
+    ["SOCKS_USER",(m.socks&&m.socks.user)||"-","上游 SOCKS 用户名前缀，节点用 user01..userNN"],
     ["REROLL_INTERVAL",d.reroll_interval,"轮换间隔秒数：每轮重新注册多少节点的账号"],
     ["REROLL_BATCH",d.reroll_batch,"每轮轮换的节点数"],
     ["HEALTH_INTERVAL",d.health_interval,"探活周期秒数；决定 15 分钟健康窗口内能覆盖多少节点"],
@@ -370,7 +370,7 @@ function renderDeploy(){
     ["控制台账号",d.admin_user,"POOL_ADMIN_USER，登录这个网页用"]
   ];
   var tr=rows.map(function(r){ return "<tr><td class=\"mono\">"+esc(r[0])+"</td><td class=\"mono\">"+esc(r[1])+"</td><td class=\"muted\">"+esc(r[2])+"</td></tr>"; }).join("");
-  var env={POOL_ID:d.pool_id+"-REGION",STATE_DIR:d.state_dir,START_PORT:d.start_port,MUX_PORT:d.mux_port,INSTANCE_COUNT:d.instance_count_env,SOCKS_USER:d.socks_user,SOCKS_PASS:"WarpPass2026",API_TOKEN:"<新池 Token>",REROLL_INTERVAL:d.reroll_interval,REROLL_BATCH:d.reroll_batch,HEALTH_INTERVAL:d.health_interval,MIN_HEALTHY:d.min_healthy,DEDUP_RETRIES:d.dedup_retries,REGISTER_RETRIES:d.register_retries,PROBE_URL:d.probe_url,PROBE_TIMEOUT:d.probe_timeout,ENDPOINTS_FILE:d.endpoints_file,POOL_PUBLIC_HOST:"<新池公网主机名>",POOL_PRIVATE_HOST:"<新池私网主机名>"};
+  var env={POOL_ID:((m.pool&&m.pool.id)||"-")+"-REGION",STATE_DIR:d.state_dir,START_PORT:d.start_port,MUX_PORT:d.mux_port,INSTANCE_COUNT:d.instance_count_env,SOCKS_USER:d.socks_user,SOCKS_PASS:"WarpPass2026",API_TOKEN:"<新池 Token>",REROLL_INTERVAL:d.reroll_interval,REROLL_BATCH:d.reroll_batch,HEALTH_INTERVAL:d.health_interval,MIN_HEALTHY:d.min_healthy,DEDUP_RETRIES:d.dedup_retries,REGISTER_RETRIES:d.register_retries,PROBE_URL:d.probe_url,PROBE_TIMEOUT:d.probe_timeout,ENDPOINTS_FILE:d.endpoints_file,POOL_PUBLIC_HOST:"<新池公网主机名>",POOL_PRIVATE_HOST:"<新池私网主机名>"};
   var html="";
   html+="<div class=\"card\"><h2>部署参数</h2><table><thead><tr><th>参数</th><th>当前值</th><th>含义</th></tr></thead><tbody>"+tr+"</tbody></table></div>";
   html+="<div class=\"card\"><h2>部署 env（JSON）</h2><pre>"+esc(JSON.stringify(env,null,2))+"</pre><div class=\"note\">这些是容器启动参数。改 INSTANCE_COUNT / START_PORT 后需要重新部署才会改变启动规模；运行中扩缩容请用「扩容与区域」页。</div></div>";
@@ -397,7 +397,7 @@ function applyScale(){
 }
 function copyNewPoolEnv(){
   var m=STATE.meta,d=m.deploy||{};
-  var env={POOL_ID:d.pool_id+"-REGION",STATE_DIR:d.state_dir,START_PORT:d.start_port,MUX_PORT:d.mux_port,INSTANCE_COUNT:d.instance_count_env,SOCKS_USER:d.socks_user,SOCKS_PASS:"WarpPass2026",API_TOKEN:"<新池 Token>",REROLL_INTERVAL:d.reroll_interval,REROLL_BATCH:d.reroll_batch,HEALTH_INTERVAL:d.health_interval,MIN_HEALTHY:d.min_healthy,DEDUP_RETRIES:d.dedup_retries,REGISTER_RETRIES:d.register_retries,PROBE_URL:d.probe_url,PROBE_TIMEOUT:d.probe_timeout,ENDPOINTS_FILE:d.endpoints_file,POOL_PUBLIC_HOST:"<新池公网主机名>",POOL_PRIVATE_HOST:"<新池私网主机名>"};
+  var env={POOL_ID:((m.pool&&m.pool.id)||"-")+"-REGION",STATE_DIR:d.state_dir,START_PORT:d.start_port,MUX_PORT:d.mux_port,INSTANCE_COUNT:d.instance_count_env,SOCKS_USER:d.socks_user,SOCKS_PASS:"WarpPass2026",API_TOKEN:"<新池 Token>",REROLL_INTERVAL:d.reroll_interval,REROLL_BATCH:d.reroll_batch,HEALTH_INTERVAL:d.health_interval,MIN_HEALTHY:d.min_healthy,DEDUP_RETRIES:d.dedup_retries,REGISTER_RETRIES:d.register_retries,PROBE_URL:d.probe_url,PROBE_TIMEOUT:d.probe_timeout,ENDPOINTS_FILE:d.endpoints_file,POOL_PUBLIC_HOST:"<新池公网主机名>",POOL_PRIVATE_HOST:"<新池私网主机名>"};
   copy(JSON.stringify(env,null,2));
 }
 
