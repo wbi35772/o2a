@@ -128,7 +128,7 @@ code { font-family:var(--mono); background:#0b0d12; border:1px solid var(--line)
 <div class="toast" id="toast"></div>
 
 <script>
-var STATE = { status:null, meta:null, tokens:null, tab:"overview", nodePage:1, nodeQuery:"", nodeFilter:"all", nodePageSize:20, authed:false };
+var STATE = { status:null, meta:null, tokens:null, relay:null, tab:"overview", nodePage:1, nodeQuery:"", nodeFilter:"all", nodePageSize:20, authed:false };
 var TABS = [["overview","概览"],["nodes","节点"],["connect","连接与鉴权"],["deploy","部署参数"],["scale","扩容与区域"],["logs","日志"],["merged","多池聚合"]];
 
 function esc(v){ return String(v==null?"":v).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
@@ -173,8 +173,8 @@ function renderNav(){
 function switchTab(id){ STATE.tab=id; renderNav(); TABS.forEach(function(t){ document.getElementById("tab-"+t[0]).classList.toggle("active",t[0]===id); }); if(id==="logs") loadLogs(); if(id==="merged") loadMerged(); if(id==="connect") loadTokens(); }
 
 function loadAll(){
-  Promise.all([api("/status"), api("/meta")]).then(function(r){
-    STATE.status=r[0]; STATE.meta=r[1]; STATE.authed=true; showLogin(false);
+  Promise.all([api("/status"), api("/meta"), api("/relay").catch(function(){ return null; })]).then(function(r){
+    STATE.status=r[0]; STATE.meta=r[1]; STATE.relay=r[2]; STATE.authed=true; showLogin(false);
     renderHeader(); renderOverview(); renderNodes(); renderConnect(); renderDeploy(); renderScale();
     if(STATE.tab==="logs") loadLogs(); if(STATE.tab==="merged") loadMerged(); if(STATE.tab==="connect") loadTokens();
   }).catch(function(e){ if(e.message!=="unauthorized") toast("加载失败: "+e.message); });
@@ -230,7 +230,44 @@ function renderOverview(){
   html+="<div class=\"note\">同平台网关填私网地址；其它平台的容器（或本地电脑）填公网地址。范围 private/public 决定网关从池里取哪一组 SOCKS 主机名。Token 可在此页下方「连接与鉴权」里新增多个，用不同 Token 给不同容器隔离鉴权。</div></div>";
   html+="</div>";
 
+  html+=renderRelayCard();
+
   document.getElementById("tab-overview").innerHTML=html;
+}
+function renderRelayCard(){
+  var r=STATE.relay;
+  var html="<div class=\"card\" style=\"margin-top:16px\"><h2>中继（订阅 UDP → WARP）</h2>";
+  if(!r || !r.enabled){
+    html+="<div class=\"muted\">本容器未启用中继（缺少 "+esc((r&&r.state_dir)||"/data/relay-root")+"/relay-mode）。池的中继预留槽位不会产生出口。</div></div>";
+    return html;
+  }
+  var sub=r.subscription||{}, t=r.tunnels||{}, err=r.error||"";
+  html+="<div class=\"kv\">";
+  html+="<div class=\"k\">订阅</div><div class=\"v\">"+esc(sub.name||"家宽订阅（UDP 中继）")+"</div>";
+  html+="<div class=\"k\">订阅节点</div><div class=\"v\">"+esc(sub.node||"-")+"</div>";
+  html+="<div class=\"k\">入口地址</div><div class=\"v\">"+esc((sub.host||"-")+":"+(sub.port||443))+" <span class=\"tag\">"+(sub.transport?esc(sub.transport):"trojan/WS/TLS")+"</span>"+(sub.ws_path?" <span class=\"mono\">"+esc(sub.ws_path)+"</span>":"")+"</div>";
+  html+="<div class=\"k\">SNI</div><div class=\"v\">"+esc(sub.sni||sub.host||"-")+"</div>";
+  html+="</div>";
+  html+="<div class=\"grid\" style=\"margin-top:14px\">";
+  html+=stat("隧道数",t.count||0);
+  html+=stat("可用",""+(t.available||0));
+  html+=stat("健康",(t.healthy||0)+" / "+(t.count||0));
+  html+=stat("失败",t.failed||0);
+  html+=stat("重复 /64",t.duplicates||0);
+  html+=stat("唯一 /64",t.unique64||0);
+  html+="</div>";
+  var regions=(r.regions||[]).map(esc).join(" · ");
+  if(regions) html+="<div class=\"hint\" style=\"margin-top:10px\">出口地区："+regions+"</div>";
+  var rows=(r.nodes||[]).map(function(n){
+    var st=n.state==="ok"?"<span class=\"tag ok\">ok</span>":"<span class=\"tag bad\">"+esc(n.state||"unknown")+"</span>";
+    var dup=n.duplicate?"<span class=\"tag bad\">重复</span>":"<span class=\"tag ok\">唯一</span>";
+    return "<tr><td class=\"mono\">"+n.index+"</td><td class=\"mono\">"+n.port+"</td><td class=\"mono\">"+esc(n.prefix||"-")+"</td><td>"+(n.loc?esc(n.loc):"-")+"</td><td>"+st+"</td><td>"+dup+"</td><td class=\"mono\">"+ago(n.updated)+"</td></tr>";
+  }).join("");
+  html+="<table style=\"margin-top:12px\"><thead><tr><th>#</th><th>本地端口</th><th>出口 /64</th><th>地区</th><th>状态</th><th>去重</th><th>更新时间</th></tr></thead><tbody>"+(rows||"<tr><td colspan=\"7\" class=\"muted\">还没有中继会话</td></tr>")+"</tbody></table>";
+  html+="<div class=\"note\"><b>来源</b>："+esc(sub.name||"订阅")+" → 节点 <span class=\"mono\">"+esc(sub.host||"-")+"</span> 的 UDP 通道，容器内起 "+ (t.count||0) +" 条 sing-box 隧道，每条各注册一个 WARP 账号，得到 "+ (t.unique64||0) +" 个唯一 /64。<br><b>健康</b>：探活 trace 成功的会话数；<b>重复</b>：与其他会话落在同一 /64 的会话数（这些会共享额度桶，应轮换收口）。<br>这些出口不在池的 512 个 wireproxy 里，而是以末尾 "+(STATE.meta&&STATE.meta.relay_slots||10)+" 个中继预留槽位的形式并入 mux。</div>";
+  if(err) html+="<div class=\"warnbox\">读取失败："+esc(err)+"</div>";
+  html+="</div>";
+  return html;
 }
 function stat(k,v){ return "<div class=\"stat\"><div class=\"k\">"+k+"</div><div class=\"v\">"+esc(v)+"</div></div>"; }
 function jsq(v){ return String(v==null?"":v).replace(/\\/g,"\\\\").replace(/'/g,"\\'").replace(/\r|\n/g,""); }

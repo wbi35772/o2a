@@ -31,6 +31,7 @@ type apiOptions struct {
 	MinHealthy    int
 	UpstreamsFile string
 	RelaySlots    int
+	RelayStateDir string
 }
 
 type apiServer struct {
@@ -51,6 +52,7 @@ type apiServer struct {
 	health      int
 	minHealthy  int
 	relaySlots  int
+	relayStateDir string
 	hub         *mergedHub
 	ln          *connListener
 }
@@ -243,6 +245,7 @@ func newAPIServer(m *mux, o apiOptions) *apiServer {
 		health:      o.Health,
 		minHealthy:  o.MinHealthy,
 		relaySlots:  o.RelaySlots,
+		relayStateDir: o.RelayStateDir,
 		hub:         newMergedHub(o.StateDir, o.UpstreamsFile, user, func(upstreamSpec) string { return m.clientPass }),
 		ln:          newConnListener(nil),
 	}
@@ -321,6 +324,12 @@ func (a *apiServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 		a.handleTokens(w, r)
 	case strings.HasPrefix(path, "/api/v1/tokens/"):
 		a.handleTokenItem(w, r, strings.TrimPrefix(path, "/api/v1/tokens/"))
+	case path == "/api/v1/relay":
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		a.handleRelay(w, r)
 	case path == "/api/v1/merged-status":
 		a.handleMergedStatus(w, r)
 	case path == "/api/v1/merged-endpoints":

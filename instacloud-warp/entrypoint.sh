@@ -744,6 +744,7 @@ start_mux() {
     -base-port "$START_PORT" \
     -count "$mux_count" \
     -relay-slots "$relay_slots" \
+    -relay-state-dir "${RELAY_STATE_DIR:-/data/relay-root}" \
     -upstream-user "$SOCKS_USER" \
     -upstream-pass "$SOCKS_PASS" \
     -client-pass "$SOCKS_PASS" \
