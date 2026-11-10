@@ -141,5 +141,5 @@ while :; do
       LAST_REFRESH=$now
     fi
   fi
-  sleep 60
+  sleep 60 9>&-
 done
