@@ -134,6 +134,7 @@ var TABS = [["overview","概览"],["nodes","节点"],["connect","连接与鉴权
 function esc(v){ return String(v==null?"":v).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
 function fmtBytes(n){ n=Number(n||0); if(!n) return "0 B"; var u=["B","KB","MB","GB","TB"]; var i=0; while(n>=1024&&i<u.length-1){n/=1024;i++} return (i?n.toFixed(1):n)+" "+u[i]; }
 function ago(ts){ if(!ts) return "-"; var d=Math.max(0,Math.floor(Date.now()/1000-ts)); if(d<60) return d+"s 前"; if(d<3600) return Math.floor(d/60)+"m 前"; if(d<86400) return Math.floor(d/3600)+"h 前"; return Math.floor(d/86400)+"d 前"; }
+function fmt64(p){ if(!p||p==="-") return "-"; return String(p).replace(/:+$/,"")+"::/64"; }
 function toast(msg){ var t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(function(){t.classList.remove("show")},2600); }
 function copy(text){ if(!text){ toast("没有可复制内容"); return; } if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(text).then(function(){toast("已复制")},function(){fallbackCopy(text)}); } else { fallbackCopy(text); } }
 function fallbackCopy(text){ var a=document.createElement("textarea"); a.value=text; document.body.appendChild(a); a.select(); try{document.execCommand("copy"); toast("已复制")}catch(e){toast("复制失败")} document.body.removeChild(a); }
@@ -261,7 +262,7 @@ function renderRelayCard(){
   var rows=(r.nodes||[]).map(function(n){
     var st=n.state==="ok"?"<span class=\"tag ok\">ok</span>":"<span class=\"tag bad\">"+esc(n.state||"unknown")+"</span>";
     var dup=n.duplicate?"<span class=\"tag bad\">重复</span>":"<span class=\"tag ok\">唯一</span>";
-    return "<tr><td class=\"mono\">"+n.index+"</td><td class=\"mono\">"+n.port+"</td><td class=\"mono\">"+esc(n.prefix||"-")+"</td><td>"+(n.loc?esc(n.loc):"-")+"</td><td>"+st+"</td><td>"+dup+"</td><td class=\"mono\">"+ago(n.updated)+"</td></tr>";
+    return "<tr><td class=\"mono\">"+n.index+"</td><td class=\"mono\">"+n.port+"</td><td class=\"mono\">"+esc(fmt64(n.prefix))+"</td><td>"+(n.loc?esc(n.loc):"-")+"</td><td>"+st+"</td><td>"+dup+"</td><td class=\"mono\">"+ago(n.updated)+"</td></tr>";
   }).join("");
   html+="<table style=\"margin-top:12px\"><thead><tr><th>#</th><th>本地端口</th><th>出口 /64</th><th>地区</th><th>状态</th><th>去重</th><th>更新时间</th></tr></thead><tbody>"+(rows||"<tr><td colspan=\"7\" class=\"muted\">还没有中继会话</td></tr>")+"</tbody></table>";
   html+="<div class=\"note\"><b>来源</b>："+esc(sub.name||"订阅")+" → 节点 <span class=\"mono\">"+esc(sub.host||"-")+"</span> 的 UDP 通道，容器内起 "+ (t.count||0) +" 条 sing-box 隧道，每条各注册一个 WARP 账号，得到 "+ (t.unique64||0) +" 个唯一 /64。<br><b>健康</b>：探活 trace 成功的会话数；<b>重复</b>：与其他会话落在同一 /64 的会话数（这些会共享额度桶，应轮换收口）。<br>这些出口不在池的 512 个 wireproxy 里，而是以末尾 "+(STATE.meta&&STATE.meta.relay_slots||10)+" 个中继预留槽位的形式并入 mux。</div>";
