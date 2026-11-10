@@ -32,6 +32,15 @@ RELAY_LENIENT_HEALTH="${RELAY_LENIENT_HEALTH:-1}"
 API_ALLOW_ANON="${API_ALLOW_ANON:-1}"
 
 LOG="$STATE_DIR/watchdog.log"
+if ! ( : >>"$LOG" ) 2>/dev/null; then
+  LOG=/tmp/relay-watchdog.log
+  echo "warn: $STATE_DIR/watchdog.log not writable, logging to $LOG" >&2
+fi
+RELAY_LOG="$STATE_DIR/relay.log"
+if ! ( : >>"$RELAY_LOG" ) 2>/dev/null; then
+  RELAY_LOG=/tmp/relay.log
+  echo "warn: $STATE_DIR/relay.log not writable, relaying to $RELAY_LOG" >&2
+fi
 ENTRYPOINT=/usr/local/bin/relay-entrypoint.sh
 
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
@@ -47,7 +56,7 @@ while :; do
       WG_ENDPOINT_HOST="$WG_ENDPOINT_HOST" DEDUP_RETRIES="$DEDUP_RETRIES" \
       HEALTH_INTERVAL="$HEALTH_INTERVAL" RELAY_LENIENT_HEALTH="$RELAY_LENIENT_HEALTH" \
       API_ALLOW_ANON="$API_ALLOW_ANON" \
-      "$ENTRYPOINT" >>"$STATE_DIR/relay.log" 2>&1 &
+      "$ENTRYPOINT" >>"$RELAY_LOG" 2>&1 &
     log "started pid $!"
   fi
   sleep 60

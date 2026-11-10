@@ -889,7 +889,7 @@ main() {
   start_mux
   if [[ -x /usr/local/bin/relay-watchdog.sh ]] && ! pgrep -f 'watchdog\.sh' >/dev/null 2>&1; then
     log "starting relay watchdog"
-    setsid /usr/local/bin/relay-watchdog.sh >>"$STATE_DIR/relay-watchdog.log" 2>&1 &
+    setsid /usr/local/bin/relay-watchdog.sh >/dev/null 2>&1 &
   fi
 
   local i boot_start boot_elapsed next_reroll now sleep_for remaining
@@ -906,7 +906,7 @@ main() {
   print_egress_block
   if [[ -x /usr/local/bin/relay-watchdog.sh ]] && ! pgrep -f 'watchdog\.sh' >/dev/null 2>&1; then
     log "starting relay watchdog"
-    setsid /usr/local/bin/relay-watchdog.sh >>"$STATE_DIR/relay-watchdog.log" 2>&1 &
+    setsid /usr/local/bin/relay-watchdog.sh >/dev/null 2>&1 &
   fi
 
   next_reroll=$(($(date +%s) + REROLL_INTERVAL))
