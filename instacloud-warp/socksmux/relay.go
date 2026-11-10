@@ -15,6 +15,7 @@ import (
 type relaySubscription struct {
 	Name      string `json:"name"`
 	Node      string `json:"node"`
+	NodeCount int    `json:"node_count,omitempty"`
 	Host      string `json:"host"`
 	Port      int    `json:"port"`
 	SNI       string `json:"sni,omitempty"`
@@ -29,12 +30,14 @@ type relayTunnels struct {
 	Failed     int `json:"failed"`
 	Duplicates int `json:"duplicates"`
 	Unique64   int `json:"unique64"`
+	Nodes      int `json:"nodes,omitempty"`
 }
 
 type relayNode struct {
 	Index     int    `json:"index"`
 	Port      int    `json:"port"`
 	PID       int    `json:"pid"`
+	Node      string `json:"node,omitempty"`
 	Endpoint  string `json:"endpoint,omitempty"`
 	Prefix    string `json:"prefix,omitempty"`
 	Loc       string `json:"loc,omitempty"`
@@ -88,7 +91,46 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// status.tsv columns: port, pid, endpoint, /64 prefix, loc, state, updated.
+// nodes.tsv: label, host, port, sni, ws_path, password per line.
+func relayNodeRows(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var rows []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) >= 6 && strings.TrimSpace(fields[0]) != "" && strings.TrimSpace(fields[5]) != "" {
+			rows = append(rows, line)
+		}
+	}
+	return rows
+}
+
+func countRelayNodes(path string) int { return len(relayNodeRows(path)) }
+
+// firstRelayNode returns the display tuple of the first subscription node.
+func firstRelayNode(path string) (host string, port int, sni, ws string) {
+	rows := relayNodeRows(path)
+	if len(rows) == 0 {
+		return "", 0, "", ""
+	}
+	fields := strings.Split(rows[0], "\t")
+	host = strings.TrimSpace(fields[1])
+	port, _ = strconv.Atoi(strings.TrimSpace(fields[2]))
+	if port <= 0 {
+		port = 443
+	}
+	sni = strings.TrimSpace(fields[3])
+	ws = strings.TrimSpace(fields[4])
+	return host, port, sni, ws
+}
+
+// status.tsv columns: port, pid, endpoint, /64 prefix, loc, state, updated, node.
 func (a *apiServer) relayView() relayView {
 	dir := strings.TrimSpace(a.relayStateDir)
 	if dir == "" {
@@ -99,26 +141,44 @@ func (a *apiServer) relayView() relayView {
 		Regions:  []string{},
 		Nodes:    []relayNode{},
 	}
+	nodesPath := filepath.Join(dir, "relay", "nodes.tsv")
+	nodeCount := countRelayNodes(nodesPath)
 	settings := readSettingsFile(filepath.Join(dir, "relay", "settings.env"))
-	view.Enabled = settings["RELAY_HOST"] != "" || fileExists(filepath.Join(dir, "relay-mode"))
+	view.Enabled = settings["RELAY_HOST"] != "" || nodeCount > 0 || fileExists(filepath.Join(dir, "relay-mode"))
 
+	nodeHost, nodePort, nodeSNI, nodeWS := firstRelayNode(nodesPath)
+	host := settings["RELAY_HOST"]
+	if host == "" {
+		host = nodeHost
+	}
 	port := 443
 	if v, err := strconv.Atoi(settings["RELAY_PORT"]); err == nil && v > 0 {
 		port = v
+	} else if nodePort > 0 {
+		port = nodePort
+	}
+	sni := settings["RELAY_SNI"]
+	if sni == "" {
+		sni = nodeSNI
+	}
+	ws := settings["RELAY_WS_PATH"]
+	if ws == "" {
+		ws = nodeWS
 	}
 	sub := relaySubscription{
 		Name:      settings["RELAY_SUB_NAME"],
 		Node:      settings["RELAY_NODE_NAME"],
-		Host:      settings["RELAY_HOST"],
+		NodeCount: nodeCount,
+		Host:      host,
 		Port:      port,
-		SNI:       settings["RELAY_SNI"],
-		WSPath:    settings["RELAY_WS_PATH"],
+		SNI:       sni,
+		WSPath:    ws,
 		Transport: "trojan / WebSocket / TLS",
 	}
 	if sub.Name == "" {
 		sub.Name = "家宽订阅（UDP 中继）"
 	}
-	if sub.Node == "" {
+	if sub.Node == "" && sub.NodeCount == 0 {
 		sub.Node = sub.Host
 	}
 	view.Subscription = sub
@@ -153,6 +213,12 @@ func (a *apiServer) relayView() relayView {
 				view.UpdatedAt = node.Updated
 			}
 		}
+		if len(fields) > 7 {
+			node.Node = strings.TrimSpace(fields[7])
+			if node.Node == "-" {
+				node.Node = ""
+			}
+		}
 		if node.Loc != "" {
 			regions[node.Loc] = true
 		}
@@ -160,6 +226,14 @@ func (a *apiServer) relayView() relayView {
 		view.Nodes = append(view.Nodes, node)
 	}
 	sort.Slice(view.Nodes, func(i, j int) bool { return view.Nodes[i].Port < view.Nodes[j].Port })
+
+	usedNodes := map[string]bool{}
+	for _, node := range view.Nodes {
+		if node.Node != "" {
+			usedNodes[node.Node] = true
+		}
+	}
+	view.Tunnels.Nodes = len(usedNodes)
 
 	seen := map[string]int{}
 	for _, node := range view.Nodes {

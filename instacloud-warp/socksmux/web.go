@@ -245,7 +245,7 @@ function renderRelayCard(){
   var sub=r.subscription||{}, t=r.tunnels||{}, err=r.error||"";
   html+="<div class=\"kv\">";
   html+="<div class=\"k\">订阅</div><div class=\"v\">"+esc(sub.name||"家宽订阅（UDP 中继）")+"</div>";
-  html+="<div class=\"k\">订阅节点</div><div class=\"v\">"+esc(sub.node||"-")+"</div>";
+  html+="<div class=\"k\">订阅节点</div><div class=\"v\">"+(sub.node_count?(sub.node_count+" 个（本次使用 "+(t.nodes||0)+" 个）"):esc(sub.node||"-"))+"</div>";
   html+="<div class=\"k\">入口地址</div><div class=\"v\">"+esc((sub.host||"-")+":"+(sub.port||443))+" <span class=\"tag\">"+(sub.transport?esc(sub.transport):"trojan/WS/TLS")+"</span>"+(sub.ws_path?" <span class=\"mono\">"+esc(sub.ws_path)+"</span>":"")+"</div>";
   html+="<div class=\"k\">SNI</div><div class=\"v\">"+esc(sub.sni||sub.host||"-")+"</div>";
   html+="</div>";
@@ -262,10 +262,10 @@ function renderRelayCard(){
   var rows=(r.nodes||[]).map(function(n){
     var st=n.state==="ok"?"<span class=\"tag ok\">ok</span>":"<span class=\"tag bad\">"+esc(n.state||"unknown")+"</span>";
     var dup=n.duplicate?"<span class=\"tag bad\">重复</span>":"<span class=\"tag ok\">唯一</span>";
-    return "<tr><td class=\"mono\">"+n.index+"</td><td class=\"mono\">"+n.port+"</td><td class=\"mono\">"+esc(fmt64(n.prefix))+"</td><td>"+(n.loc?esc(n.loc):"-")+"</td><td>"+st+"</td><td>"+dup+"</td><td class=\"mono\">"+ago(n.updated)+"</td></tr>";
+    return "<tr><td class=\"mono\">"+n.index+"</td><td class=\"mono\">"+esc(n.node||"-")+"</td><td class=\"mono\">"+n.port+"</td><td class=\"mono\">"+esc(fmt64(n.prefix))+"</td><td>"+(n.loc?esc(n.loc):"-")+"</td><td>"+st+"</td><td>"+dup+"</td><td class=\"mono\">"+ago(n.updated)+"</td></tr>";
   }).join("");
-  html+="<table style=\"margin-top:12px\"><thead><tr><th>#</th><th>本地端口</th><th>出口 /64</th><th>地区</th><th>状态</th><th>去重</th><th>更新时间</th></tr></thead><tbody>"+(rows||"<tr><td colspan=\"7\" class=\"muted\">还没有中继会话</td></tr>")+"</tbody></table>";
-  html+="<div class=\"note\"><b>来源</b>："+esc(sub.name||"订阅")+" → 节点 <span class=\"mono\">"+esc(sub.host||"-")+"</span> 的 UDP 通道，容器内起 "+ (t.count||0) +" 条 sing-box 隧道，每条各注册一个 WARP 账号，得到 "+ (t.unique64||0) +" 个唯一 /64。<br><b>健康</b>：探活 trace 成功的会话数；<b>重复</b>：与其他会话落在同一 /64 的会话数（这些会共享额度桶，应轮换收口）。<br>这些出口不在池的 512 个 wireproxy 里，而是以末尾 "+(STATE.meta&&STATE.meta.relay_slots||10)+" 个中继预留槽位的形式并入 mux。</div>";
+  html+="<table style=\"margin-top:12px\"><thead><tr><th>#</th><th>订阅节点</th><th>本地端口</th><th>出口 /64</th><th>地区</th><th>状态</th><th>去重</th><th>更新时间</th></tr></thead><tbody>"+(rows||"<tr><td colspan=\"8\" class=\"muted\">还没有中继会话</td></tr>")+"</tbody></table>";
+  html+="<div class=\"note\"><b>来源</b>："+esc(sub.name||"订阅")+" 的 "+ (sub.node_count||1) +" 个 UDP 节点，会话按节点轮询分配，容器内起 "+ (t.count||0) +" 条 sing-box 隧道，每条各注册一个 WARP 账号，得到 "+ (t.unique64||0) +" 个唯一 /64。<br><b>健康</b>：探活 trace 成功的会话数；<b>重复</b>：与其他会话落在同一 /64 的会话数（这些会共享额度桶，应轮换收口）。<br>这些出口不在池的 512 个 wireproxy 里，而是以独立中继 mux 并入聚合。</div>";
   if(err) html+="<div class=\"warnbox\">读取失败："+esc(err)+"</div>";
   html+="</div>";
   return html;

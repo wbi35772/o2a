@@ -25,7 +25,7 @@ set -u
 
 STATE_DIR="${RELAY_STATE_DIR:-/data/relay-root}"
 MUX_PORT="${RELAY_MUX_PORT:-11081}"
-RELAY_COUNT="${RELAY_COUNT:-10}"
+RELAY_COUNT="${RELAY_COUNT:-}"
 SING_PORT_BASE="${SING_PORT_BASE:-1594}"
 RELAY_PROBE_URL="${RELAY_PROBE_URL:-https://[2606:4700:4700::1111]/cdn-cgi/trace}"
 WG_ENDPOINT_HOST="${WG_ENDPOINT_HOST:-162.159.192.1}"
@@ -52,8 +52,16 @@ ENTRYPOINT=/usr/local/bin/relay-entrypoint.sh
 # defines functions and defaults; main() is not invoked by source. The watchdog
 # log() must be defined after the source, otherwise the relay log() shadows it
 # and every watchdog line lands in relay.log instead of watchdog.log.
+# Resolve RELAY_COUNT from relay/settings.env and relay/nodes.tsv once here so
+# the first supervisor start already uses the configured session count.
 # shellcheck source=/dev/null
 . "$ENTRYPOINT"
+load_secrets
+reload_settings
+if ! [[ "$RELAY_COUNT" =~ ^[0-9]+$ ]] || ((10#$RELAY_COUNT < 1)); then
+  RELAY_COUNT=10
+fi
+RELAY_COUNT=$((10#$RELAY_COUNT))
 
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
 
@@ -69,10 +77,10 @@ refresh_status() {
     pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
     if [[ -n "$res" ]]; then
       IFS=$'\t' read -r prefix ip loc <<<"$res"
-      status_set "$port" "$pid" "$(relay_endpoint)" "$prefix" "$loc" "ok"
+      status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "ok"
       ok=$((ok + 1))
     else
-      status_set "$port" "$pid" "$(relay_endpoint)" "" "" "probe-failed"
+      status_set "$port" "$pid" "$(session_endpoint "$i")" "" "" "probe-failed"
       failed+=("$i")
     fi
   done
@@ -92,10 +100,10 @@ refresh_status() {
       pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
       if [[ -n "$res" ]]; then
         IFS=$'\t' read -r prefix ip loc <<<"$res"
-        status_set "$port" "$pid" "$(relay_endpoint)" "$prefix" "$loc" "ok"
+        status_set "$port" "$pid" "$(session_endpoint "$idx")" "$prefix" "$loc" "ok"
         log "recovered n$(printf '%02d' "$idx") prefix=$prefix"
       else
-        status_set "$port" "$pid" "$(relay_endpoint)" "" "" "probe-failed"
+        status_set "$port" "$pid" "$(session_endpoint "$idx")" "" "" "probe-failed"
         log "recover n$(printf '%02d' "$idx") still failing"
       fi
     else

@@ -19,11 +19,13 @@ RELAY_DIR="$STATE_DIR/relay"
 SESSION_ROOT="$RELAY_DIR/instances"
 SETTINGS_FILE="$RELAY_DIR/settings.env"
 SECRETS_FILE="$RELAY_DIR/secrets.env"
+NODES_FILE="${RELAY_NODES_FILE:-$RELAY_DIR/nodes.tsv}"
 STATUS_FILE="$STATE_DIR/status.tsv"
 
 MUX_PORT="${MUX_PORT:-1081}"
 MUX_LISTEN="${MUX_LISTEN:-0.0.0.0}"
-RELAY_COUNT="${RELAY_COUNT:-10}"
+RELAY_COUNT_ENV="${RELAY_COUNT:-}"
+RELAY_COUNT="${RELAY_COUNT_ENV:-}"
 SING_PORT_BASE="${SING_PORT_BASE:-12101}"
 SOCKS_USER="${SOCKS_USER:-warpuser}"
 RELAY_PORT="${RELAY_PORT:-443}"
@@ -51,6 +53,14 @@ RELAY_WS_PATH_ENV="${RELAY_WS_PATH}"
 RELAY_HOST="${RELAY_HOST_ENV}"
 RELAY_PASSWORD="${RELAY_PASSWORD_ENV}"
 RELAY_SNI="${RELAY_SNI_ENV}"
+RELAY_NODE_NAME="${RELAY_NODE_NAME:-}"
+
+# Multi-node mode: nodes.tsv is one tab-separated row per subscription node:
+#   label<TAB>host<TAB>port<TAB>sni<TAB>ws_path<TAB>password
+# Sessions are assigned round-robin. With no file the single RELAY_* settings
+# above are used for every session.
+declare -a NODE_LABEL=() NODE_HOSTS=() NODE_PORTS=() NODE_SNIS=() NODE_WSPATHS=() NODE_PASSWORDS=()
+NODE_COUNT=0
 
 export API_ALLOW_ANON="${API_ALLOW_ANON:-1}"
 export RELAY_LENIENT_HEALTH="${RELAY_LENIENT_HEALTH:-1}"
@@ -76,6 +86,9 @@ apply_kv() {
     RELAY_SNI) RELAY_SNI=$2 ;;
     RELAY_WS_PATH) RELAY_WS_PATH=$2 ;;
     RELAY_API_TOKEN) RELAY_API_TOKEN=$2 ;;
+    RELAY_COUNT) RELAY_COUNT=$2 ;;
+    RELAY_SUB_NAME) RELAY_SUB_NAME=$2 ;;
+    RELAY_NODE_NAME) RELAY_NODE_NAME=$2 ;;
   esac
 }
 
@@ -101,16 +114,51 @@ reload_settings() {
   RELAY_PORT="$RELAY_PORT_ENV"
   RELAY_SNI="$RELAY_SNI_ENV"
   RELAY_WS_PATH="$RELAY_WS_PATH_ENV"
+  RELAY_COUNT="$RELAY_COUNT_ENV"
   load_settings
+  load_nodes
+  if [[ -z "$RELAY_COUNT" ]]; then
+    if ((NODE_COUNT > 0)); then RELAY_COUNT=$NODE_COUNT; else RELAY_COUNT=10; fi
+  fi
+  [[ "$RELAY_COUNT" =~ ^[0-9]+$ ]] || RELAY_COUNT=10
+}
+
+# nodes.tsv is authoritative when present: each row is one subscription node.
+load_nodes() {
+  NODE_LABEL=()
+  NODE_HOSTS=()
+  NODE_PORTS=()
+  NODE_SNIS=()
+  NODE_WSPATHS=()
+  NODE_PASSWORDS=()
+  NODE_COUNT=0
+  [[ -f "$NODES_FILE" ]] || return 0
+  local line label host port sni ws pass
+  while IFS=$'\t' read -r label host port sni ws pass || [[ -n "$label" ]]; do
+    label=${label%$'\r'}
+    [[ -z "$label" || "$label" == \#* ]] && continue
+    [[ -n "$host" && -n "$pass" ]] || continue
+    NODE_LABEL+=("$label")
+    NODE_HOSTS+=("$host")
+    NODE_PORTS+=("${port:-443}")
+    NODE_SNIS+=("${sni:-$host}")
+    NODE_WSPATHS+=("${ws:-/pgtrojan}")
+    NODE_PASSWORDS+=("$pass")
+    NODE_COUNT=$((NODE_COUNT + 1))
+  done <"$NODES_FILE"
 }
 
 settings_sig() {
+  local sig="none"
   if [[ -f "$SETTINGS_FILE" ]]; then
-    printf '%s-%s' "$(stat -c %Y "$SETTINGS_FILE" 2>/dev/null || printf '0')" \
-      "$(cksum <"$SETTINGS_FILE" 2>/dev/null | awk '{print $1"-"$2}')"
-  else
-    printf 'none'
+    sig=$(printf '%s-%s' "$(stat -c %Y "$SETTINGS_FILE" 2>/dev/null || printf '0')" \
+      "$(cksum <"$SETTINGS_FILE" 2>/dev/null | awk '{print $1"-"$2}')")
   fi
+  if [[ -f "$NODES_FILE" ]]; then
+    sig+=$(printf '-n%s-%s' "$(stat -c %Y "$NODES_FILE" 2>/dev/null || printf '0')" \
+      "$(cksum <"$NODES_FILE" 2>/dev/null | awk '{print $1"-"$2}')")
+  fi
+  printf '%s' "$sig"
 }
 
 load_secrets() {
@@ -130,11 +178,68 @@ load_secrets() {
 }
 
 relay_enabled() {
+  ((NODE_COUNT > 0)) && return 0
   [[ -n "$RELAY_HOST" && -n "$RELAY_PASSWORD" ]] && return 0
   return 1
 }
 
 relay_endpoint() { printf '%s:%s' "$RELAY_HOST" "$RELAY_PORT"; }
+
+// Sessions are split into contiguous per-node blocks, so the first
+// ceil(RELAY_COUNT/NODE_COUNT) sessions use node 1, the next block node 2,
+// and so on. Reordering nodes.tsv therefore moves whole blocks, never a
+// single live session in the middle of a line.
+session_node_index() {
+  local i=$1 per
+  if ((NODE_COUNT > 0)); then
+    per=$(( (RELAY_COUNT + NODE_COUNT - 1) / NODE_COUNT ))
+    ((per > 0)) || per=1
+    printf '%d' $(( (i - 1) / per + 1 ))
+  else
+    printf '1'
+  fi
+}
+
+# node_field <session> <label|host|port|sni|ws|pass>
+node_field() {
+  local i=$1 f=$2 idx
+  if ((NODE_COUNT > 0)); then
+    idx=$(session_node_index "$i")
+    idx=$((idx - 1))
+    case "$f" in
+      label) printf '%s' "${NODE_LABEL[$idx]}" ;;
+      host) printf '%s' "${NODE_HOSTS[$idx]}" ;;
+      port) printf '%s' "${NODE_PORTS[$idx]}" ;;
+      sni) printf '%s' "${NODE_SNIS[$idx]}" ;;
+      ws) printf '%s' "${NODE_WSPATHS[$idx]}" ;;
+      pass) printf '%s' "${NODE_PASSWORDS[$idx]}" ;;
+    esac
+  else
+    case "$f" in
+      label) printf '%s' "${RELAY_NODE_NAME:-$RELAY_HOST}" ;;
+      host) printf '%s' "$RELAY_HOST" ;;
+      port) printf '%s' "$RELAY_PORT" ;;
+      sni) printf '%s' "${RELAY_SNI:-$RELAY_HOST}" ;;
+      ws) printf '%s' "$RELAY_WS_PATH" ;;
+      pass) printf '%s' "$RELAY_PASSWORD" ;;
+    esac
+  fi
+}
+
+session_endpoint() {
+  local i=$1
+  printf '%s:%s' "$(node_field "$i" host)" "$(node_field "$i" port)"
+}
+
+node_name_for_port() {
+  local port=$1 i
+  i=$((port - SING_PORT_BASE + 1))
+  if ((i >= 1 && i <= RELAY_COUNT)); then
+    node_field "$i" label
+  else
+    printf '%s' "-"
+  fi
+}
 
 # ---- status ----------------------------------------------------------------
 
@@ -142,13 +247,14 @@ status_set() {
   local port=$1
   shift
   local -a f=("$@")
-  local out="" i v
+  local out="" i v node="${f[5]:-}"
   for ((i = 0; i < 5; i++)); do
     v="${f[$i]:-}"
     [[ -n "$v" ]] || v="-"
     out+="${out:+$'\t'}$v"
   done
-  STATUS["$port"]="$out"$'\t'"$(date +%s)"
+  [[ -n "$node" ]] || node=$(node_name_for_port "$port")
+  STATUS["$port"]="$out"$'\t'"$(date +%s)"$'\t'"${node:--}"
 }
 
 flush_status() {
@@ -246,9 +352,15 @@ render_config() {
   peer_port=${peer_ep##*:}
   [[ "$peer_port" =~ ^[0-9]+$ ]] || peer_port="$WG_ENDPOINT_PORT"
   peer_port=$((10#$peer_port))
-  sni="${RELAY_SNI:-$RELAY_HOST}"
-  rhost_ip=$(getent ahostsv4 "$RELAY_HOST" 2>/dev/null | awk '$2=="STREAM"{print $1; exit}' || true)
-  [[ -n "$rhost_ip" ]] || rhost_ip="$RELAY_HOST"
+  local nhost nport nsni nws npass
+  nhost=$(node_field "$i" host)
+  nport=$(node_field "$i" port)
+  nsni=$(node_field "$i" sni)
+  nws=$(node_field "$i" ws)
+  npass=$(node_field "$i" pass)
+  sni="$nsni"
+  rhost_ip=$(getent ahostsv4 "$nhost" 2>/dev/null | awk '$2=="STREAM"{print $1; exit}' || true)
+  [[ -n "$rhost_ip" ]] || rhost_ip="$nhost"
   port=$(sing_port "$i")
 
   if ! jq -n \
@@ -256,10 +368,10 @@ render_config() {
     --arg user "$SOCKS_USER" \
     --arg pass "$SOCKS_PASS" \
     --arg rhost "$rhost_ip" \
-    --argjson rport "$((10#$RELAY_PORT))" \
-    --arg rpass "$RELAY_PASSWORD" \
+    --argjson rport "$((10#$nport))" \
+    --arg rpass "$npass" \
     --arg sni "$sni" \
-    --arg ws "$RELAY_WS_PATH" \
+    --arg ws "$nws" \
     --arg priv "$priv" \
     --arg addr6 "$addr6" \
     --arg peerpub "$peerpub" \
@@ -404,23 +516,23 @@ bring_up() {
   fi
   if ! account_valid "$dir"; then
     if ! register_session "$i"; then
-      status_set "$port" 0 "$(relay_endpoint)" "" "" "register-failed"
+      status_set "$port" 0 "$(session_endpoint "$i")" "" "" "register-failed"
       return 1
     fi
   fi
   if ! profile_valid "$dir"; then
     if ! generate_profile "$i"; then
-      status_set "$port" 0 "$(relay_endpoint)" "" "" "generate-failed"
+      status_set "$port" 0 "$(session_endpoint "$i")" "" "" "generate-failed"
       return 1
     fi
   fi
   if ! render_config "$i" "$dir"; then
     log "session $(printf 'n%02d' "$i") config render/check failed"
-    status_set "$port" 0 "$(relay_endpoint)" "" "" "config-failed"
+    status_set "$port" 0 "$(session_endpoint "$i")" "" "" "config-failed"
     return 1
   fi
   if ! start_session "$i" "$dir" "$port"; then
-    status_set "$port" 0 "$(relay_endpoint)" "" "" "listen-failed"
+    status_set "$port" 0 "$(session_endpoint "$i")" "" "" "listen-failed"
     return 1
   fi
   pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
@@ -433,11 +545,11 @@ bring_up() {
     IFS=$'\t' read -r prefix ip loc <<<"$res" || true
   fi
   if [[ -n "$prefix" ]] && valid_prefix "$prefix"; then
-    status_set "$port" "$pid" "$(relay_endpoint)" "$prefix" "$loc" "ok"
+    status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "ok"
     log "up $(printf 'n%02d' "$i") port=$port prefix=$prefix"
     return 0
   fi
-  status_set "$port" "$pid" "$(relay_endpoint)" "$prefix" "$loc" "bad-prefix"
+  status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "bad-prefix"
   log "up $(printf 'n%02d' "$i") port=$port prefix='${prefix:-none}' (invalid or duplicate; dedup will reroll)"
   return 0
 }
@@ -482,7 +594,7 @@ dedup_pass() {
       if [[ -n "$prefix" ]] && valid_prefix "$prefix" && [[ -z "${seen[$prefix]:-}" ]]; then
         seen["$prefix"]="$port"
         ok=$((ok + 1))
-        status_set "$port" "$pid" "$(relay_endpoint)" "$prefix" "$loc" "ok"
+        status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "ok"
         break
       fi
       if [[ -z "$prefix" ]]; then
@@ -492,12 +604,12 @@ dedup_pass() {
           sleep 2
           continue
         fi
-        status_set "$port" "$pid" "$(relay_endpoint)" "" "" "probe-failed"
+        status_set "$port" "$pid" "$(session_endpoint "$i")" "" "" "probe-failed"
         break
       fi
       if ((tries >= DEDUP_RETRIES)); then
         log "WARN $(printf 'n%02d' "$i") port=$port prefix='${prefix:-none}' still invalid or duplicate after ${DEDUP_RETRIES} rerolls"
-        status_set "$port" "$pid" "$(relay_endpoint)" "$prefix" "$loc" "bad"
+        status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "bad"
         break
       fi
       tries=$((tries + 1))
@@ -528,7 +640,7 @@ health_pass() {
       seen["$prefix"]="$port"
       state=$(printf '%s' "${STATUS[$port]:-}" | cut -f5)
       [[ "$state" == "ok" ]] || changed=1
-      status_set "$port" "$pid" "$(relay_endpoint)" "$prefix" "$loc" "ok"
+      status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "ok"
       continue
     fi
     changed=1
@@ -537,7 +649,7 @@ health_pass() {
       restart_session "$i" || true
     elif valid_prefix "$prefix"; then
       log "health: port $port duplicate /64 $prefix; keeping session"
-      status_set "$port" "$pid" "$(relay_endpoint)" "$prefix" "$loc" "bad"
+      status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "bad"
       continue
     else
       log "health: port $port bad prefix $prefix; restarting sing-box"
@@ -559,7 +671,7 @@ health_pass() {
     elif [[ -z "$prefix" ]]; then
       state="probe-failed"
     fi
-    status_set "$port" "$pid" "$(relay_endpoint)" "$prefix" "$loc" "$state"
+    status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "$state"
   done
   flush_status
   ((changed)) && log "health: relay pool changed"
@@ -638,8 +750,9 @@ start_all_sessions() {
 
 mark_all() {
   local state=$1 i ep=""
-  relay_enabled && ep=$(relay_endpoint)
   for ((i = 1; i <= RELAY_COUNT; i++)); do
+    ep=""
+    relay_enabled && ep=$(session_endpoint "$i")
     status_set "$(sing_port "$i")" 0 "$ep" "" "" "$state"
   done
   flush_status
@@ -648,7 +761,7 @@ mark_all() {
 validate_env() {
   [[ "$RELAY_COUNT" =~ ^[0-9]+$ ]] || die "RELAY_COUNT must be numeric"
   RELAY_COUNT=$((10#$RELAY_COUNT))
-  ((RELAY_COUNT >= 1 && RELAY_COUNT <= 64)) || die "RELAY_COUNT must be 1-64"
+  ((RELAY_COUNT >= 1 && RELAY_COUNT <= 128)) || die "RELAY_COUNT must be 1-128"
   [[ "$SING_PORT_BASE" =~ ^[0-9]+$ ]] || die "SING_PORT_BASE must be numeric"
   SING_PORT_BASE=$((10#$SING_PORT_BASE))
   ((SING_PORT_BASE + RELAY_COUNT - 1 <= 65535)) || die "session port range overflows"
@@ -676,10 +789,10 @@ main() {
   start_mux
 
   if relay_enabled; then
-    log "relay configured: host=${RELAY_HOST} port=${RELAY_PORT} sessions=${RELAY_COUNT}"
+    log "relay configured: nodes=${NODE_COUNT} host=$(node_field 1 host) sessions=${RELAY_COUNT}"
     start_all_sessions
   else
-    log "relay not configured (missing host/password in $SETTINGS_FILE); mux and API only"
+    log "relay not configured (missing nodes.tsv or host/password in $SETTINGS_FILE); mux and API only"
   fi
 
   local next_health now ns
@@ -689,13 +802,17 @@ main() {
     ns=$(settings_sig)
     if [[ "$ns" != "$sig" ]]; then
       sig=$ns
-      log "relay settings changed; rebuilding sessions"
-      local i
-      for ((i = 1; i <= RELAY_COUNT; i++)); do stop_session "$i"; done
+      log "relay settings/nodes changed; rebuilding sessions"
+      local i old_count=$RELAY_COUNT
+      for ((i = 1; i <= old_count; i++)); do stop_session "$i"; done
       reload_settings
       validate_env
+      if ((RELAY_COUNT != old_count)); then
+        stop_mux
+        start_mux
+      fi
       if relay_enabled; then
-        log "relay reconfigured: host=${RELAY_HOST} port=${RELAY_PORT}"
+        log "relay reconfigured: nodes=${NODE_COUNT} sessions=${RELAY_COUNT}"
         start_all_sessions
       else
         mark_all "unconfigured"
