@@ -80,6 +80,14 @@ refresh_status() {
 
 mkdir -p "$STATE_DIR"
 
+# Single-instance lock: a second watchdog exits immediately instead of probing
+# and rewriting status.tsv concurrently with the first one.
+exec 9>"$STATE_DIR/watchdog.lock" || { echo "cannot open $STATE_DIR/watchdog.lock" >&2; exit 1; }
+if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
+  log "another relay watchdog holds $STATE_DIR/watchdog.lock; exiting"
+  exit 0
+fi
+
 # First refresh shortly after start, then every REFRESH_INTERVAL seconds.
 LAST_REFRESH=$(($(date +%s) - REFRESH_INTERVAL + 120))
 
