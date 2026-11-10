@@ -727,17 +727,21 @@ stop_mux() {
 
 start_mux() {
   [[ -n "$MUX_PORT" ]] || return 0
-  local last_port=$((START_PORT + INSTANCE_COUNT - 1))
+  local mux_count=$INSTANCE_COUNT
+  if [[ -f "${RELAY_STATE_DIR:-/data/relay-root}/relay-mode" ]]; then
+    mux_count=$((INSTANCE_COUNT + ${RELAY_MUX_SLOTS:-10}))
+  fi
+  local last_port=$((START_PORT + mux_count - 1))
   if ((MUX_PORT >= START_PORT && MUX_PORT <= last_port)); then
     log "WARN MUX_PORT ${MUX_PORT} is inside the wireproxy range ${START_PORT}-${last_port}; mux disabled until START_PORT moves past it"
     return 0
   fi
-  log "starting socks mux on ${MUX_LISTEN}:${MUX_PORT} -> 127.0.0.1:${START_PORT}-${last_port}"
+  log "starting socks mux on ${MUX_LISTEN}:${MUX_PORT} -> 127.0.0.1:${START_PORT}-${last_port} (count=${mux_count})"
   /usr/local/bin/socksmux \
     -listen "${MUX_LISTEN}:${MUX_PORT}" \
     -backend-host 127.0.0.1 \
     -base-port "$START_PORT" \
-    -count "$INSTANCE_COUNT" \
+    -count "$mux_count" \
     -upstream-user "$SOCKS_USER" \
     -upstream-pass "$SOCKS_PASS" \
     -client-pass "$SOCKS_PASS" \
@@ -883,6 +887,10 @@ main() {
   log "warp-pool-producer starting: ${INSTANCE_COUNT} instances, ports ${START_PORT}-${last_port}, host=$PUBLIC_HOST"
   log "reroll=${REROLL_INTERVAL}s batch=${REROLL_BATCH} probe=${PROBE_URL}"
   start_mux
+  if [[ -x /usr/local/bin/relay-watchdog.sh ]] && ! pgrep -f 'watchdog\.sh' >/dev/null 2>&1; then
+    log "starting relay watchdog"
+    setsid /usr/local/bin/relay-watchdog.sh >>"$STATE_DIR/relay-watchdog.log" 2>&1 &
+  fi
 
   local i boot_start boot_elapsed next_reroll now sleep_for remaining
   boot_start=$(date +%s)
