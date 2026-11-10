@@ -32,6 +32,7 @@ WG_ENDPOINT_HOST="${WG_ENDPOINT_HOST:-162.159.192.1}"
 DEDUP_RETRIES="${DEDUP_RETRIES:-4}"
 HEALTH_INTERVAL="${RELAY_HEALTH_INTERVAL:-86400}"
 REFRESH_INTERVAL="${RELAY_REFRESH_INTERVAL:-300}"
+RECOVER_PER_ROUND="${RELAY_RECOVER_PER_ROUND:-1}"
 RELAY_LENIENT_HEALTH="${RELAY_LENIENT_HEALTH:-1}"
 API_ALLOW_ANON="${API_ALLOW_ANON:-1}"
 
@@ -57,7 +58,7 @@ ENTRYPOINT=/usr/local/bin/relay-entrypoint.sh
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
 
 refresh_status() {
-  local i port dir res prefix ip loc pid ok=0
+  local i port dir res prefix ip loc pid ok=0 failed=()
   load_secrets
   reload_settings
   validate_env
@@ -72,10 +73,40 @@ refresh_status() {
       ok=$((ok + 1))
     else
       status_set "$port" "$pid" "$(relay_endpoint)" "" "" "probe-failed"
+      failed+=("$i")
     fi
   done
   flush_status
-  log "status refreshed: ok=$ok/$RELAY_COUNT"
+  log "status refreshed: ok=$ok/$RELAY_COUNT failed=${#failed[@]}"
+
+  # Recover at most RECOVER_PER_ROUND failed sessions per pass, so a flapping
+  # subscription node does not trigger a re-register storm across all tunnels.
+  local n=0 idx
+  for idx in "${failed[@]}"; do
+    ((n >= RECOVER_PER_ROUND)) && break
+    port=$((SING_PORT_BASE + idx - 1))
+    dir="$STATE_DIR/relay/instances/$(printf 'n%02d' "$idx")"
+    log "recover n$(printf '%02d' "$idx") port=$port"
+    if recover_session "$idx" >>"$RELAY_LOG" 2>&1; then
+      res=$(probe "$port" 2>/dev/null || true)
+      pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
+      if [[ -n "$res" ]]; then
+        IFS=$'\t' read -r prefix ip loc <<<"$res"
+        status_set "$port" "$pid" "$(relay_endpoint)" "$prefix" "$loc" "ok"
+        log "recovered n$(printf '%02d' "$idx") prefix=$prefix"
+      else
+        status_set "$port" "$pid" "$(relay_endpoint)" "" "" "probe-failed"
+        log "recover n$(printf '%02d' "$idx") still failing"
+      fi
+    else
+      log "recover n$(printf '%02d' "$idx") failed (register/up error)"
+    fi
+    n=$((n + 1))
+  done
+  if ((n > 0)); then
+    flush_status
+    log "after recovery: $(awk -F'\t' '$6=="ok"{c++} END{print c+0}' "$STATUS_FILE")/${RELAY_COUNT} ok"
+  fi
 }
 
 mkdir -p "$STATE_DIR"
@@ -100,7 +131,7 @@ while :; do
       WG_ENDPOINT_HOST="$WG_ENDPOINT_HOST" DEDUP_RETRIES="$DEDUP_RETRIES" \
       HEALTH_INTERVAL="$HEALTH_INTERVAL" RELAY_LENIENT_HEALTH="$RELAY_LENIENT_HEALTH" \
       API_ALLOW_ANON="$API_ALLOW_ANON" \
-      "$ENTRYPOINT" >>"$RELAY_LOG" 2>&1 &
+      "$ENTRYPOINT" >>"$RELAY_LOG" 2>&1 9>&- &
     log "started pid $!"
     LAST_REFRESH=$(($(date +%s) - REFRESH_INTERVAL + 120))
   else
