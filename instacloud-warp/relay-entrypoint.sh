@@ -62,6 +62,11 @@ RELAY_SUB_URL_ENV="${RELAY_SUB_URL:-}"
 RELAY_SUB_URL="$RELAY_SUB_URL_ENV"
 RELAY_SYNC_INTERVAL="${RELAY_SYNC_INTERVAL:-1800}"
 
+# Auto session count follows nodes.tsv. RELAY_MAX_AUTO is only a memory guard:
+# every session is one sing-box process plus its own wgcf account.
+RELAY_MAX_AUTO="${RELAY_MAX_AUTO:-100}"
+[[ "$RELAY_MAX_AUTO" =~ ^[0-9]+$ ]] || RELAY_MAX_AUTO=100
+
 # Multi-node mode: nodes.tsv is one tab-separated row per subscription node:
 #   label<TAB>host<TAB>port<TAB>sni<TAB>ws_path<TAB>password
 # Sessions are assigned round-robin. With no file the single RELAY_* settings
@@ -130,7 +135,7 @@ reload_settings() {
   if [[ -z "$RELAY_COUNT" ]]; then
     if ((NODE_COUNT > 0)); then
       RELAY_COUNT=$NODE_COUNT
-      if ((RELAY_COUNT > 32)); then RELAY_COUNT=32; fi
+      if ((RELAY_COUNT > RELAY_MAX_AUTO)); then RELAY_COUNT=$RELAY_MAX_AUTO; fi
     else
       RELAY_COUNT=10
     fi
