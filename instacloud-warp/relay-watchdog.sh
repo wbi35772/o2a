@@ -47,12 +47,14 @@ if ! ( : >>"$RELAY_LOG" ) 2>/dev/null; then
 fi
 ENTRYPOINT=/usr/local/bin/relay-entrypoint.sh
 
-log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
-
 # Reuse probe/status_set/flush_status from the relay entrypoint. Sourcing only
-# defines functions and defaults; main() is not invoked by source.
+# defines functions and defaults; main() is not invoked by source. The watchdog
+# log() must be defined after the source, otherwise the relay log() shadows it
+# and every watchdog line lands in relay.log instead of watchdog.log.
 # shellcheck source=/dev/null
 . "$ENTRYPOINT"
+
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
 
 refresh_status() {
   local i port dir res prefix ip loc pid ok=0
