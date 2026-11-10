@@ -134,7 +134,7 @@ while :; do
   if ! pgrep -f 'relay-entrypoint\.sh' >/dev/null 2>&1; then
     log "relay supervisor missing; starting"
     cd "$STATE_DIR" || exit 1
-    setsid env STATE_DIR="$STATE_DIR" MUX_PORT="$MUX_PORT" RELAY_COUNT="$RELAY_COUNT" \
+    setsid env STATE_DIR="$STATE_DIR" MUX_PORT="$MUX_PORT" \
       SING_PORT_BASE="$SING_PORT_BASE" RELAY_PROBE_URL="$RELAY_PROBE_URL" \
       WG_ENDPOINT_HOST="$WG_ENDPOINT_HOST" DEDUP_RETRIES="$DEDUP_RETRIES" \
       HEALTH_INTERVAL="$HEALTH_INTERVAL" RELAY_LENIENT_HEALTH="$RELAY_LENIENT_HEALTH" \

@@ -216,7 +216,8 @@ settings_sig() {
       "$(cksum <"$SETTINGS_FILE" 2>/dev/null | awk '{print $1"-"$2}')")
   fi
   if [[ -f "$NODES_FILE" ]]; then
-    sig+=$(printf '-n%s-%s' "$(stat -c %Y "$NODES_FILE" 2>/dev/null || printf '0')" \
+    sig+='-n'
+    sig+=$(printf '%s-%s' "$(stat -c %Y "$NODES_FILE" 2>/dev/null || printf '0')" \
       "$(cksum <"$NODES_FILE" 2>/dev/null | awk '{print $1"-"$2}')")
   fi
   printf '%s' "$sig"
