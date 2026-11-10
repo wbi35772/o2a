@@ -55,6 +55,13 @@ RELAY_PASSWORD="${RELAY_PASSWORD_ENV}"
 RELAY_SNI="${RELAY_SNI_ENV}"
 RELAY_NODE_NAME="${RELAY_NODE_NAME:-}"
 
+# Subscription auto-sync: when RELAY_SUB_URL is set, the relay periodically
+# fetches the Clash subscription and rewrites relay/nodes.tsv. A change in the
+# file is picked up by settings_sig() and rebuilds the sessions.
+RELAY_SUB_URL_ENV="${RELAY_SUB_URL:-}"
+RELAY_SUB_URL="$RELAY_SUB_URL_ENV"
+RELAY_SYNC_INTERVAL="${RELAY_SYNC_INTERVAL:-1800}"
+
 # Multi-node mode: nodes.tsv is one tab-separated row per subscription node:
 #   label<TAB>host<TAB>port<TAB>sni<TAB>ws_path<TAB>password
 # Sessions are assigned round-robin. With no file the single RELAY_* settings
@@ -89,6 +96,8 @@ apply_kv() {
     RELAY_COUNT) RELAY_COUNT=$2 ;;
     RELAY_SUB_NAME) RELAY_SUB_NAME=$2 ;;
     RELAY_NODE_NAME) RELAY_NODE_NAME=$2 ;;
+    RELAY_SUB_URL) RELAY_SUB_URL=$2 ;;
+    RELAY_SYNC_INTERVAL) RELAY_SYNC_INTERVAL=$2 ;;
   esac
 }
 
@@ -115,12 +124,20 @@ reload_settings() {
   RELAY_SNI="$RELAY_SNI_ENV"
   RELAY_WS_PATH="$RELAY_WS_PATH_ENV"
   RELAY_COUNT="$RELAY_COUNT_ENV"
+  RELAY_SUB_URL="$RELAY_SUB_URL_ENV"
   load_settings
   load_nodes
   if [[ -z "$RELAY_COUNT" ]]; then
-    if ((NODE_COUNT > 0)); then RELAY_COUNT=$NODE_COUNT; else RELAY_COUNT=10; fi
+    if ((NODE_COUNT > 0)); then
+      RELAY_COUNT=$NODE_COUNT
+      if ((RELAY_COUNT > 32)); then RELAY_COUNT=32; fi
+    else
+      RELAY_COUNT=10
+    fi
   fi
   [[ "$RELAY_COUNT" =~ ^[0-9]+$ ]] || RELAY_COUNT=10
+  [[ "$RELAY_SYNC_INTERVAL" =~ ^[0-9]+$ ]] || RELAY_SYNC_INTERVAL=1800
+  if ((10#$RELAY_SYNC_INTERVAL < 60)); then RELAY_SYNC_INTERVAL=60; fi
 }
 
 # nodes.tsv is authoritative when present: each row is one subscription node.
@@ -146,6 +163,50 @@ load_nodes() {
     NODE_PASSWORDS+=("$pass")
     NODE_COUNT=$((NODE_COUNT + 1))
   done <"$NODES_FILE"
+}
+
+# Fetch the Clash subscription and rewrite nodes.tsv. The file is only
+# replaced when the parsed node list actually changed, so an unchanged
+# subscription does not trigger a session rebuild through settings_sig().
+sync_nodes() {
+  [[ -n "$RELAY_SUB_URL" ]] || return 0
+  local raw="$RELAY_DIR/subscription.yaml.tmp" tmp="$NODES_FILE.tmp.$$" n=0
+  if ! curl -fsS --max-time 30 "$RELAY_SUB_URL" -o "$raw" 2>/dev/null; then
+    rm -f "$raw"
+    log "subscription sync failed (keeping current node list)"
+    return 1
+  fi
+  awk '
+    function clean(s) { gsub(/\r/,"",s); gsub(/^[ \t]+|[ \t]+$/,"",s); gsub(/^"|"$/,"",s); return s }
+    function flush() {
+      if (name != "" && host != "" && pass != "" && typ == "trojan")
+        printf "%s\t%s\t%s\t%s\t%s\t%s\n", name, host, (port==""?"443":port), (sni==""?host:sni), (path==""?"/pgtrojan":path), pass
+      name=host=port=sni=path=pass=typ=""
+    }
+    /^[ \t]*- name:[ \t]*/   { flush(); v=$0; sub(/^[ \t]*- name:[ \t]*/,"",v); name=clean(v); next }
+    /^[ \t]*type:[ \t]*/     { v=$0; sub(/^[ \t]*type:[ \t]*/,"",v); typ=clean(v); next }
+    /^[ \t]*server:[ \t]*/   { v=$0; sub(/^[ \t]*server:[ \t]*/,"",v); host=clean(v); next }
+    /^[ \t]*port:[ \t]*/     { v=$0; sub(/^[ \t]*port:[ \t]*/,"",v); port=clean(v); next }
+    /^[ \t]*password:[ \t]*/ { v=$0; sub(/^[ \t]*password:[ \t]*/,"",v); pass=clean(v); next }
+    /^[ \t]*sni:[ \t]*/      { v=$0; sub(/^[ \t]*sni:[ \t]*/,"",v); sni=clean(v); next }
+    /^[ \t]*path:[ \t]*/     { v=$0; sub(/^[ \t]*path:[ \t]*/,"",v); path=clean(v); next }
+    END { flush() }
+  ' "$raw" >"$tmp" 2>/dev/null || { rm -f "$raw" "$tmp"; log "subscription parse failed"; return 1; }
+  rm -f "$raw"
+  [[ -s "$tmp" ]] && n=$(wc -l <"$tmp")
+  if ((n < 1)); then
+    rm -f "$tmp"
+    log "subscription returned no trojan nodes (keeping current node list)"
+    return 1
+  fi
+  if [[ -f "$NODES_FILE" ]] && cmp -s "$tmp" "$NODES_FILE"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$NODES_FILE"
+  log "subscription synced: $n nodes"
+  return 0
 }
 
 settings_sig() {
@@ -185,10 +246,10 @@ relay_enabled() {
 
 relay_endpoint() { printf '%s:%s' "$RELAY_HOST" "$RELAY_PORT"; }
 
-// Sessions are split into contiguous per-node blocks, so the first
-// ceil(RELAY_COUNT/NODE_COUNT) sessions use node 1, the next block node 2,
-// and so on. Reordering nodes.tsv therefore moves whole blocks, never a
-// single live session in the middle of a line.
+# Sessions are split into contiguous per-node blocks, so the first
+# ceil(RELAY_COUNT/NODE_COUNT) sessions use node 1, the next block node 2,
+# and so on. Reordering nodes.tsv therefore moves whole blocks, never a
+# single live session in the middle of a line.
 session_node_index() {
   local i=$1 per
   if ((NODE_COUNT > 0)); then
@@ -781,6 +842,10 @@ main() {
 
   load_secrets
   reload_settings
+  if [[ -n "$RELAY_SUB_URL" ]]; then
+    sync_nodes || true
+    reload_settings
+  fi
   validate_env
   local sig
   sig=$(settings_sig)
@@ -795,10 +860,18 @@ main() {
     log "relay not configured (missing nodes.tsv or host/password in $SETTINGS_FILE); mux and API only"
   fi
 
-  local next_health now ns
+  local next_health next_sync now ns
   next_health=$(($(date +%s) + HEALTH_INTERVAL))
+  next_sync=$(($(date +%s) + RELAY_SYNC_INTERVAL))
   while :; do
     sleep 5
+    now=$(date +%s)
+    if [[ -n "$RELAY_SUB_URL" ]] && ((now >= next_sync)); then
+      next_sync=$((now + RELAY_SYNC_INTERVAL))
+      if sync_nodes; then
+        reload_settings
+      fi
+    fi
     ns=$(settings_sig)
     if [[ "$ns" != "$sig" ]]; then
       sig=$ns
