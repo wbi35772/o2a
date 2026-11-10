@@ -1,8 +1,10 @@
 #!/bin/bash
 # relay-watchdog.sh - keep the relay supervisor alive inside the warp-pool
-# container. The relay is optional infrastructure: the pool control plane keeps
-# working without it, so this script only restarts a missing supervisor and
-# never blocks the pool entrypoint.
+# container and keep its published status file fresh.
+#
+# The relay is optional infrastructure: the pool control plane keeps working
+# without it, so this script only restarts a missing supervisor and refreshes
+# the relay status table; it never blocks the pool entrypoint.
 #
 # Environment (all optional):
 #   RELAY_STATE_DIR      relay state root (default /data/relay-root; the pool
@@ -15,7 +17,8 @@
 #   WG_ENDPOINT_HOST     WARP endpoint (default 162.159.192.1)
 #   DEDUP_RETRIES        startup dedup attempts (default 4)
 #   RELAY_HEALTH_INTERVAL supervisor health pass (default 86400; keep sessions
-#                        stable, the mux reports the live status instead)
+#                        stable, the watchdog refreshes the mux status instead)
+#   RELAY_REFRESH_INTERVAL status refresh period (default 300)
 #   RELAY_LENIENT_HEALTH 1 = do not rotate a duplicate /64 aggressively
 #   API_ALLOW_ANON       1 = allow the local mux status without a token
 set -u
@@ -28,6 +31,7 @@ RELAY_PROBE_URL="${RELAY_PROBE_URL:-https://[2606:4700:4700::1111]/cdn-cgi/trace
 WG_ENDPOINT_HOST="${WG_ENDPOINT_HOST:-162.159.192.1}"
 DEDUP_RETRIES="${DEDUP_RETRIES:-4}"
 HEALTH_INTERVAL="${RELAY_HEALTH_INTERVAL:-86400}"
+REFRESH_INTERVAL="${RELAY_REFRESH_INTERVAL:-300}"
 RELAY_LENIENT_HEALTH="${RELAY_LENIENT_HEALTH:-1}"
 API_ALLOW_ANON="${API_ALLOW_ANON:-1}"
 
@@ -45,7 +49,37 @@ ENTRYPOINT=/usr/local/bin/relay-entrypoint.sh
 
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
 
+# Reuse probe/status_set/flush_status from the relay entrypoint. Sourcing only
+# defines functions and defaults; main() is not invoked by source.
+# shellcheck source=/dev/null
+. "$ENTRYPOINT"
+
+refresh_status() {
+  local i port dir res prefix ip loc pid ok=0
+  load_secrets
+  reload_settings
+  validate_env
+  for ((i = 1; i <= RELAY_COUNT; i++)); do
+    port=$((SING_PORT_BASE + i - 1))
+    dir="$STATE_DIR/relay/instances/$(printf 'n%02d' "$i")"
+    res=$(probe "$port" 2>/dev/null || true)
+    pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
+    if [[ -n "$res" ]]; then
+      IFS=$'\t' read -r prefix ip loc <<<"$res"
+      status_set "$port" "$pid" "$(relay_endpoint)" "$prefix" "$loc" "ok"
+      ok=$((ok + 1))
+    else
+      status_set "$port" "$pid" "$(relay_endpoint)" "" "" "probe-failed"
+    fi
+  done
+  flush_status
+  log "status refreshed: ok=$ok/$RELAY_COUNT"
+}
+
 mkdir -p "$STATE_DIR"
+
+# First refresh shortly after start, then every REFRESH_INTERVAL seconds.
+LAST_REFRESH=$(($(date +%s) - REFRESH_INTERVAL + 120))
 
 while :; do
   if ! pgrep -f 'relay-entrypoint\.sh' >/dev/null 2>&1; then
@@ -58,6 +92,13 @@ while :; do
       API_ALLOW_ANON="$API_ALLOW_ANON" \
       "$ENTRYPOINT" >>"$RELAY_LOG" 2>&1 &
     log "started pid $!"
+    LAST_REFRESH=$(($(date +%s) - REFRESH_INTERVAL + 120))
+  else
+    now=$(date +%s)
+    if ((now - LAST_REFRESH >= REFRESH_INTERVAL)); then
+      refresh_status || log "status refresh failed"
+      LAST_REFRESH=$now
+    fi
   fi
   sleep 60
 done
