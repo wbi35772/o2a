@@ -2,6 +2,17 @@
 
 本仓库是 OpenCode2API 部署栈的唯一源码源。长期只保留 `main` 一个分支；旧的实验线已删，只留两个只读标签 `legacy/free-only`、`legacy/instacloud-warp`。
 
+## 一键 Docker 部署
+
+```bash
+git clone https://github.com/wbi35772/o2a.git
+cd o2a/deploy
+cp .env.example .env    # 改 SOCKS_PASS / POOL_API_TOKEN / ADMIN_PASS
+docker compose --profile core up -d --build
+```
+
+完整步骤、验收命令、数据迁移、边缘节点和排错见 `deploy/README.md`。
+
 ## 构建单元
 
 | 单元 | 目录 | 建议镜像名 | 端口 | 数据卷 | 备注 |

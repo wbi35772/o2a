@@ -26,3 +26,7 @@ coverage.out
 
 # Local build artifacts
 *.exe
+
+# Compose deployment secrets and data
+deploy/.env
+deploy/data/
