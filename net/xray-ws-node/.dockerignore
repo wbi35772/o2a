@@ -1,0 +1,7 @@
+.git
+.gitignore
+*.md
+node_modules
+data
+uuid.txt
+xray-config.json

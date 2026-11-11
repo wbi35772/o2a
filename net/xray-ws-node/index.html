@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VLESS 节点中心</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f0f2f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 16px; box-sizing: border-box; }
+    .card { background: #fff; padding: 24px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,.1); width: 100%; max-width: 620px; }
+    h2 { margin: 0 0 4px; color: #333; text-align: center; }
+    .hint { margin: 0 0 18px; text-align: center; color: #888; font-size: 12px; }
+    .box { margin-bottom: 14px; }
+    label { font-weight: 600; color: #555; font-size: 13px; display: block; margin-bottom: 5px; }
+    input[type="text"] { width: 100%; padding: 9px; box-sizing: border-box; border: 1px solid #ddd; border-radius: 6px; background: #fafafa; font-size: 13px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+    .btn-group { display: flex; gap: 10px; margin-top: 6px; }
+    button { background: #1677ff; color: #fff; border: 0; padding: 9px 16px; border-radius: 6px; font-size: 13px; cursor: pointer; flex: 1; transition: background .2s; }
+    button:hover { background: #0958d9; }
+    button.ok { background: #52c41a !important; }
+    .meta { margin-top: 18px; padding-top: 12px; border-top: 1px solid #eee; color: #999; font-size: 12px; display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    code { background: #f5f5f5; padding: 1px 5px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>VLESS 节点</h2>
+    <p class="hint">链接按当前访问域名自动生成</p>
+
+    <div class="box">
+      <label>UUID</label>
+      <input type="text" id="uuid" value="__UUID__" readonly>
+      <div class="btn-group"><button onclick="copyText('uuid', this)">复制 UUID</button></div>
+    </div>
+
+    <div class="box">
+      <label>单节点链接</label>
+      <input type="text" id="nodeLink" readonly>
+      <div class="btn-group"><button onclick="copyText('nodeLink', this)">复制节点</button></div>
+    </div>
+
+    <div class="box">
+      <label>v2rayN / v2rayNG 订阅</label>
+      <input type="text" id="subLink" readonly>
+      <div class="btn-group"><button onclick="copyText('subLink', this)">复制订阅</button></div>
+    </div>
+
+    <div class="box">
+      <label>Clash / Mihomo 订阅</label>
+      <input type="text" id="clashLink" readonly>
+      <div class="btn-group"><button onclick="copyText('clashLink', this)">复制 Clash 订阅</button></div>
+    </div>
+
+    <div class="meta">
+      <span>WS 路径 <code>__WS_PATH__</code></span>
+      <span>公网端口 <code>__PUBLIC_PORT__</code></span>
+      <span>TLS <code>__PUBLIC_TLS__</code></span>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const host = window.location.host.split(':')[0];
+      const protocol = window.location.protocol;
+      const uuid = "__UUID__";
+      const wsPath = "__WS_PATH__";
+      const publicPort = "__PUBLIC_PORT__";
+      const tls = "__PUBLIC_TLS__" === '1';
+
+      const params = new URLSearchParams({
+        encryption: 'none',
+        security: tls ? 'tls' : 'none',
+        type: 'ws',
+        host: host,
+        path: wsPath
+      });
+      const node = `vless://${uuid}@${host}:${publicPort}?${params.toString()}#Node-${host.split('.')[0]}`;
+
+      document.getElementById('nodeLink').value = node;
+      document.getElementById('subLink').value = `${protocol}//${window.location.host}/sub`;
+      document.getElementById('clashLink').value = `${protocol}//${window.location.host}/sub?format=clash`;
+    })();
+
+    function copyText(id, btn) {
+      const input = document.getElementById(id);
+      input.select();
+      input.setSelectionRange(0, 99999);
+      const done = () => {
+        const label = btn.textContent;
+        btn.textContent = '已复制';
+        btn.classList.add('ok');
+        setTimeout(() => { btn.textContent = label; btn.classList.remove('ok'); }, 1600);
+      };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(input.value).then(done).catch(() => { document.execCommand('copy'); done(); });
+      } else {
+        document.execCommand('copy');
+        done();
+      }
+    }
+  </script>
+</body>
+</html>

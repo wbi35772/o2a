@@ -1,0 +1,13 @@
+{
+  "name": "xray-ws-node",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Xray VLESS+WS node front door (rebuilt from InstaCloud-github and pella-node)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
