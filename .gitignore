@@ -21,10 +21,8 @@ coverage.out
 .local/
 *.availability.json
 
-# Local agent credentials
-.insta/agent-session.json
+# Local platform binding and agent credentials
+.insta/
 
-.insta/.agent-session-*.tmp
-
-# Local: the control plane this machine linked against
-.insta/link-plane.json
+# Local build artifacts
+*.exe
