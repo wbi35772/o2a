@@ -94,6 +94,7 @@ refresh_status() {
     ((n >= RECOVER_PER_ROUND)) && break
     port=$((SING_PORT_BASE + idx - 1))
     dir="$STATE_DIR/relay/instances/$(printf 'n%02d' "$idx")"
+    res=""
     log "recover n$(printf '%02d' "$idx") port=$port"
     if recover_session "$idx" >>"$RELAY_LOG" 2>&1; then
       res=$(probe "$port" 2>/dev/null || true)
@@ -109,6 +110,21 @@ refresh_status() {
     else
       log "recover n$(printf '%02d' "$idx") failed (register/up error)"
     fi
+    if [[ -z "$res" ]]; then
+      log "rebind n$(printf '%02d' "$idx") port=$port after failed recovery"
+      if rebind_session "$idx" >>"$RELAY_LOG" 2>&1; then
+        res=$(probe "$port" 2>/dev/null || true)
+        pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
+        if [[ -n "$res" ]]; then
+          IFS=$'	' read -r prefix ip loc <<<"$res"
+          status_set "$port" "$pid" "$(session_endpoint "$idx")" "$prefix" "$loc" "ok"
+          log "rebound n$(printf '%02d' "$idx") prefix=$prefix"
+        else
+          status_set "$port" "$pid" "$(session_endpoint "$idx")" "" "" "probe-failed"
+          log "rebind n$(printf '%02d' "$idx") still failing"
+        fi
+      fi
+    fi
     n=$((n + 1))
   done
   if ((n > 0)); then
@@ -122,13 +138,15 @@ mkdir -p "$STATE_DIR"
 # Single-instance lock: a second watchdog exits immediately instead of probing
 # and rewriting status.tsv concurrently with the first one.
 exec 9>"$STATE_DIR/watchdog.lock" || { echo "cannot open $STATE_DIR/watchdog.lock" >&2; exit 1; }
-if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
-  log "another relay watchdog holds $STATE_DIR/watchdog.lock; exiting"
+# The relay supervisor may inherit fd 9; a pgrep guard is used instead.
+if pgrep -f 'relay-watchdog\.sh' | grep -qv "^$$$"; then
+  log "another relay watchdog is running; exiting"
   exit 0
 fi
 
 # First refresh shortly after start, then every REFRESH_INTERVAL seconds.
 LAST_REFRESH=$(($(date +%s) - REFRESH_INTERVAL + 120))
+START_TS=$(date +%s)
 
 while :; do
   if ! pgrep -f 'relay-entrypoint\.sh' >/dev/null 2>&1; then
@@ -144,6 +162,10 @@ while :; do
     LAST_REFRESH=$(($(date +%s) - REFRESH_INTERVAL + 120))
   else
     now=$(date +%s)
+    if (( now - START_TS < 240 )); then
+      sleep 60 9>&-
+      continue
+    fi
     if ((now - LAST_REFRESH >= REFRESH_INTERVAL)); then
       refresh_status || log "status refresh failed"
       LAST_REFRESH=$now

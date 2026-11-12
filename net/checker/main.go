@@ -130,6 +130,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/", s.handleUI)
 	mux.HandleFunc("/api/check", s.auth(s.handleCheck))
 	mux.HandleFunc("/api/info", s.auth(s.handleInfo))
 

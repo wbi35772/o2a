@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>o2a Checker</title>
+<style>
+:root { --bg:#0d0f14; --panel:#171a21; --panel2:#1b1f27; --line:#252b36; --fg:#e6e9ef; --muted:#8b94a7; --ok:#3fb950; --bad:#f85149; --accent:#4493f8; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+header { padding:18px 22px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+header h1 { margin:0; font-size:17px; font-weight:600; }
+header .sub { color:var(--muted); font-size:12px; }
+main { padding:18px 22px; max-width:1100px; display:grid; gap:14px; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+label { display:block; color:var(--muted); font-size:12px; margin-bottom:5px; }
+input, select, textarea { width:100%; background:var(--panel2); color:var(--fg); border:1px solid var(--line); border-radius:7px; padding:8px 10px; font:inherit; }
+textarea { resize:vertical; }
+.row { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin-top:10px; }
+.actions { display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap; }
+button { background:var(--panel2); color:var(--fg); border:1px solid var(--line); border-radius:7px; padding:8px 14px; font:inherit; cursor:pointer; }
+button:hover { border-color:var(--accent); }
+button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+button:disabled { opacity:.55; cursor:default; }
+.muted { color:var(--muted); font-size:12px; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { text-align:left; padding:7px 9px; border-bottom:1px solid var(--line); vertical-align:top; word-break:break-all; }
+th { color:var(--muted); font-weight:500; font-size:12px; }
+.pass { color:var(--ok); font-weight:600; }
+.fail { color:var(--bad); font-weight:600; }
+pre { margin:8px 0 0; padding:10px; background:var(--panel2); border:1px solid var(--line); border-radius:7px; overflow:auto; font-size:12px; max-height:320px; }
+details summary { cursor:pointer; color:var(--muted); font-size:12px; margin-top:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>o2a Checker</h1>
+  <span class="sub">endpoint reachability · tcp / http / https</span>
+</header>
+<main>
+  <section class="card">
+    <label for="token">Checker Token（X-Checker-Token，保存在本机浏览器）</label>
+    <div class="row" style="grid-template-columns:1fr auto">
+      <input id="token" type="password" placeholder="CHECKER_TOKEN" autocomplete="off">
+      <button id="save">保存并刷新信息</button>
+    </div>
+    <div id="info" class="muted" style="margin-top:8px">未加载</div>
+  </section>
+  <section class="card">
+    <label for="targets">目标（每行一个：HOST:PORT 或 HOST）</label>
+    <textarea id="targets" rows="5" placeholder="api.ipify.org:443&#10;18080-agq4uw3nnf2ckra45gcrdcoyf4.instabox.tech"></textarea>
+    <div class="row">
+      <div><label for="scheme">scheme</label><select id="scheme"><option>tcp</option><option>https</option><option>http</option></select></div>
+      <div><label for="path">path</label><input id="path" value="/healthz"></div>
+      <div><label for="timeout">timeout_ms</label><input id="timeout" type="number" placeholder="5000"></div>
+      <div><label for="expect">expect_status</label><input id="expect" type="number" placeholder="200"></div>
+      <div><label for="contains">contains</label><input id="contains" placeholder="可选，响应体包含"></div>
+      <div><label for="conc">concurrency</label><input id="conc" type="number" value="8"></div>
+    </div>
+    <div class="actions">
+      <button id="run" class="primary">开始检测</button>
+      <span id="status" class="muted"></span>
+    </div>
+  </section>
+  <section class="card">
+    <table>
+      <thead><tr><th>target</th><th>scheme</th><th>结果</th><th>status</th><th>latency</th><th>error</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <details><summary>原始响应 JSON</summary><pre id="raw">-</pre></details>
+  </section>
+</main>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var KEY = "o2aCheckerToken";
+  function token() { return $("token").value.trim() || localStorage.getItem(KEY) || ""; }
+  function headers() {
+    var h = { "Content-Type": "application/json" };
+    var t = token();
+    if (t) h["X-Checker-Token"] = t;
+    return h;
+  }
+  function setInfo(text, bad) {
+    var el = $("info");
+    el.textContent = text;
+    el.className = bad ? "fail" : "muted";
+  }
+  async function loadInfo() {
+    if (!token()) { setInfo("未填 token（若服务未开鉴权可留空）"); return; }
+    try {
+      var r = await fetch("/api/info", { headers: headers() });
+      if (r.status === 401) { setInfo("token 无效（401）", true); return; }
+      var j = await r.json();
+      setInfo("v" + j.version + " · auth=" + j.auth + " · max_batch=" + j.max_batch + " · timeout=" + j.default_timeout_ms + "ms");
+    } catch (e) { setInfo("读取信息失败: " + e.message, true); }
+  }
+  function cell(text, cls) {
+    var td = document.createElement("td");
+    td.textContent = text;
+    if (cls) td.className = cls;
+    return td;
+  }
+  function render(data) {
+    var tb = $("tbody");
+    tb.textContent = "";
+    var list = data.results || [];
+    list.forEach(function (r) {
+      var tr = document.createElement("tr");
+      tr.appendChild(cell(r.target));
+      tr.appendChild(cell(r.scheme));
+      tr.appendChild(cell(r.ok ? "PASS" : "FAIL", r.ok ? "pass" : "fail"));
+      tr.appendChild(cell(r.status || "-"));
+      tr.appendChild(cell(r.latency_ms + " ms"));
+      tr.appendChild(cell(r.error || ""));
+      tb.appendChild(tr);
+    });
+    $("status").textContent = data.ok ? ("全部通过 " + data.passed + "/" + data.total) : ("失败 " + data.failed + "/" + data.total);
+    $("status").className = data.ok ? "pass" : "fail";
+    $("raw").textContent = JSON.stringify(data, null, 2);
+  }
+  async function run() {
+    var lines = $("targets").value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+    if (!lines.length) { $("status").textContent = "请先填目标"; $("status").className = "fail"; return; }
+    var body = { targets: lines, scheme: $("scheme").value, path: $("path").value || "/", concurrency: Number($("conc").value) || 8 };
+    var t = Number($("timeout").value); if (t > 0) body.timeout_ms = t;
+    var e = Number($("expect").value); if (e > 0) body.expect_status = e;
+    if ($("contains").value.trim()) body.contains = $("contains").value.trim();
+    $("run").disabled = true;
+    $("status").textContent = "检测中…";
+    $("status").className = "muted";
+    try {
+      var r = await fetch("/api/check", { method: "POST", headers: headers(), body: JSON.stringify(body) });
+      if (r.status === 401) { $("status").textContent = "token 无效（401）"; $("status").className = "fail"; return; }
+      if (!r.ok) { $("status").textContent = "HTTP " + r.status; $("status").className = "fail"; return; }
+      render(await r.json());
+    } catch (e2) {
+      $("status").textContent = "请求失败: " + e2.message;
+      $("status").className = "fail";
+    } finally {
+      $("run").disabled = false;
+    }
+  }
+  $("save").addEventListener("click", function () {
+    var t = $("token").value.trim();
+    if (t) localStorage.setItem(KEY, t);
+    loadInfo();
+  });
+  $("run").addEventListener("click", run);
+  var saved = localStorage.getItem(KEY);
+  if (saved) $("token").value = saved;
+  loadInfo();
+})();
+</script>
+</body>
+</html>

@@ -25,6 +25,12 @@ const WS_PATH = normalizePath(process.env.WS_PATH || '/proxy');
 const STATE_DIR = process.env.STATE_DIR || '/data';
 const PUBLIC_PORT = String(process.env.PUBLIC_PORT || 443);
 const PUBLIC_TLS = String(process.env.PUBLIC_TLS || '1') !== '0';
+const SOCKS_ENABLED = String(process.env.SOCKS_ENABLED || '1') !== '0';
+const SOCKS_PORT = Number(process.env.SOCKS_PORT || 11080);
+const SOCKS_LISTEN = process.env.SOCKS_LISTEN || '0.0.0.0';
+const SOCKS_USER = process.env.SOCKS_USER || 'o2a';
+const SOCKS_PASS = process.env.SOCKS_PASS || '';
+const SUB_TOKEN = (process.env.SUB_TOKEN || '').trim();
 const UUID_FILE = path.join(STATE_DIR, 'uuid.txt');
 const CONFIG_FILE = path.join(STATE_DIR, 'xray-config.json');
 const INDEX_FILE = path.join(__dirname, 'index.html');
@@ -49,25 +55,39 @@ function loadUuid() {
 }
 
 const UUID = loadUuid();
+if (!SUB_TOKEN) console.warn('SUB_TOKEN unset: /sub and /api/info are public');
 
 function writeXrayConfig() {
+  const inbounds = [{
+    tag: 'vless-ws',
+    listen: '127.0.0.1',
+    port: XRAY_PORT,
+    protocol: 'vless',
+    settings: {
+      clients: [{ id: UUID, flow: '' }],
+      decryption: 'none'
+    },
+    streamSettings: {
+      network: 'ws',
+      wsSettings: { path: WS_PATH }
+    },
+    sniffing: { enabled: true, destOverride: ['http', 'tls'] }
+  }];
+  if (SOCKS_ENABLED) {
+    const socks = {
+      tag: 'socks',
+      listen: SOCKS_LISTEN,
+      port: SOCKS_PORT,
+      protocol: 'socks',
+      settings: { auth: SOCKS_PASS ? 'password' : 'noauth', udp: true },
+      sniffing: { enabled: true, destOverride: ['http', 'tls'] }
+    };
+    if (SOCKS_PASS) socks.settings.accounts = [{ user: SOCKS_USER, pass: SOCKS_PASS }];
+    inbounds.push(socks);
+  }
   const config = {
     log: { loglevel: process.env.XRAY_LOG_LEVEL || 'warning' },
-    inbounds: [{
-      tag: 'vless-ws',
-      listen: '127.0.0.1',
-      port: XRAY_PORT,
-      protocol: 'vless',
-      settings: {
-        clients: [{ id: UUID, flow: '' }],
-        decryption: 'none'
-      },
-      streamSettings: {
-        network: 'ws',
-        wsSettings: { path: WS_PATH }
-      },
-      sniffing: { enabled: true, destOverride: ['http', 'tls'] }
-    }],
+    inbounds,
     outbounds: [
       { tag: 'direct', protocol: 'freedom' },
       { tag: 'block', protocol: 'blackhole' }
@@ -175,6 +195,16 @@ function clashFor(host) {
   ].join('\n');
 }
 
+const SUB_UA = /(v2ray|clash|mihomo|sing-box|shadowrocket|stash|quantumult|sagernet|hiddify|nekobox|passwall|surfboard|loon|surge|verge)/i;
+
+function tokenOK(url) {
+  if (!SUB_TOKEN) return true;
+  const got = Buffer.from(String(url.searchParams.get('token') || ''));
+  const want = Buffer.from(SUB_TOKEN);
+  if (got.length !== want.length) return false;
+  try { return crypto.timingSafeEqual(got, want); } catch (_) { return false; }
+}
+
 function send(res, status, type, body) {
   res.writeHead(status, {
     'Content-Type': type,
@@ -194,12 +224,17 @@ const server = http.createServer((req, res) => {
   }
   const pathname = url.pathname.replace(/\/+$/, '') || '/';
 
+  if ((pathname === '/sub' || pathname === '/api/info') && !tokenOK(url)) {
+    return send(res, 403, 'application/json; charset=utf-8', JSON.stringify({ error: 'forbidden' }));
+  }
+
   if (pathname === '/healthz' || pathname === '/ping') {
     const body = JSON.stringify({
       ok: xrayHealthy(),
       xray: xrayHealthy(),
       restarts: xrayRestarts,
       ws_path: WS_PATH,
+      socks: SOCKS_ENABLED,
       port: PORT,
       uptime_s: Math.floor(process.uptime())
     });
@@ -207,6 +242,19 @@ const server = http.createServer((req, res) => {
   }
 
   if (pathname === '/' || pathname === '/index.html') {
+    res.writeHead(302, { Location: '/sub' + url.search, 'Cache-Control': 'no-store' });
+    return res.end();
+  }
+
+  if (pathname === '/sub') {
+    const format = (url.searchParams.get('format') || '').toLowerCase();
+    if (format === 'clash') {
+      return send(res, 200, 'text/yaml; charset=utf-8', clashFor(host));
+    }
+    if (url.searchParams.get('raw') === '1' || SUB_UA.test(req.headers['user-agent'] || '')) {
+      const link = linkFor(host);
+      return send(res, 200, 'text/plain; charset=utf-8', Buffer.from(link).toString('base64'));
+    }
     let html = '<!doctype html><meta charset="utf-8"><title>node</title><pre id="l"></pre>';
     try { html = fs.readFileSync(INDEX_FILE, 'utf8'); } catch (_) {}
     html = html
@@ -214,16 +262,9 @@ const server = http.createServer((req, res) => {
       .replace(/__HOST__/g, host)
       .replace(/__WS_PATH__/g, WS_PATH)
       .replace(/__PUBLIC_PORT__/g, PUBLIC_PORT)
-      .replace(/__PUBLIC_TLS__/g, PUBLIC_TLS ? '1' : '0');
+      .replace(/__PUBLIC_TLS__/g, PUBLIC_TLS ? '1' : '0')
+      .replace(/__SUB_TOKEN__/g, SUB_TOKEN);
     return send(res, 200, 'text/html; charset=utf-8', html);
-  }
-
-  if (pathname === '/sub') {
-    const link = linkFor(host);
-    if ((url.searchParams.get('format') || '').toLowerCase() === 'clash') {
-      return send(res, 200, 'text/yaml; charset=utf-8', clashFor(host));
-    }
-    return send(res, 200, 'text/plain; charset=utf-8', Buffer.from(link).toString('base64'));
   }
 
   if (pathname === '/api/info') {
@@ -233,7 +274,9 @@ const server = http.createServer((req, res) => {
       ws_path: WS_PATH,
       public_port: Number(PUBLIC_PORT),
       tls: PUBLIC_TLS,
-      link: linkFor(host)
+      link: linkFor(host),
+      sub_url: SUB_TOKEN ? '/sub?token=' + encodeURIComponent(SUB_TOKEN) : '/sub',
+      token_required: Boolean(SUB_TOKEN)
     }));
   }
 
@@ -250,7 +293,13 @@ server.on('upgrade', (req, socket, head) => {
     return;
   }
   const upstream = net.connect(XRAY_PORT, '127.0.0.1', () => {
-    upstream.write(head);
+    let raw = req.method + ' ' + req.url + ' HTTP/1.1\r\n';
+    for (let i = 0; i < req.rawHeaders.length; i += 2) {
+      raw += req.rawHeaders[i] + ': ' + req.rawHeaders[i + 1] + '\r\n';
+    }
+    raw += '\r\n';
+    upstream.write(raw);
+    if (head && head.length) upstream.write(head);
     socket.pipe(upstream);
     upstream.pipe(socket);
   });

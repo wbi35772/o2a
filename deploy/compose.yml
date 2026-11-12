@@ -42,6 +42,7 @@ services:
         condition: service_completed_successfully
     environment:
       STATE_DIR: /data
+      REGISTER_CHAIN_PORT: "1594"
       START_PORT: "${POOL_START_PORT:-1578}"
       POOL_SIZE: "${POOL_SIZE:-16}"
       INSTANCE_COUNT: "${POOL_SIZE:-16}"
@@ -54,6 +55,8 @@ services:
       SOCKS_USER: "${SOCKS_USER:-warpuser}"
       SOCKS_PASS: "${SOCKS_PASS:?set SOCKS_PASS in deploy/.env}"
       API_TOKEN: "${POOL_API_TOKEN:-}"
+      POOL_ADMIN_USER: "${POOL_ADMIN_USER:-admin}"
+      POOL_ADMIN_PASSWORD: "${POOL_ADMIN_PASSWORD:-}"
       MIN_HEALTHY: "${MIN_HEALTHY:-14}"
       # Relay runs inside this container through relay-watchdog.sh.
       RELAY_STATE_DIR: /data/relay-root
@@ -65,12 +68,28 @@ services:
       RELAY_PUBLIC_HOST: "${RELAY_PUBLIC_HOST:-}"
       RELAY_SUB_URL: "${RELAY_SUB_URL:-}"
       RELAY_SYNC_INTERVAL: "${RELAY_SUB_SYNC_INTERVAL:-1800}"
+      RELAY_PROBE_URL: "${RELAY_PROBE_URL:-https://[2606:4700:4700::1111]/cdn-cgi/trace}"
+      RELAY_START_STAGGER: "${RELAY_START_STAGGER:-2.5}"
+      RELAY_REFRESH_INTERVAL: "${RELAY_REFRESH_INTERVAL:-120}"
+      RELAY_RECOVER_PER_ROUND: "${RELAY_RECOVER_PER_ROUND:-4}"
+      RELAY_PROBE_TIMEOUT: "${RELAY_PROBE_TIMEOUT:-12}"
       RELAY_API_TOKEN: "${RELAY_API_TOKEN:-}"
+      RELAY_PLAIN_WS: "${RELAY_PLAIN_WS:-0}"
+      RELAY_NODE_HOST_OVERRIDE: "${RELAY_NODE_HOST_OVERRIDE:-}"
+      RELAY_NODE_PORT_OVERRIDE: "${RELAY_NODE_PORT_OVERRIDE:-}"
+      RELAY_WG_ENDPOINTS: "${RELAY_WG_ENDPOINTS:-}"
+      BURNED_FILE: /shared/burned-prefix64.tsv
+      REROLL_QUEUE: /shared/relay-reroll.queue
       API_ALLOW_ANON: "1"
       WG_ENDPOINT_HOST: "${WG_ENDPOINT_HOST:-162.159.192.1}"
       TZ: "${TZ:-UTC}"
     volumes:
       - ${DATA_ROOT:-./data}/pool:/data
+      - ${DATA_ROOT:-./data}/shared:/shared
+      - ${DATA_ROOT:-./data}/relay-nodes.tsv:/data/relay-root/relay/nodes.tsv:ro
+      - ../instacloud-warp/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
+      - ../instacloud-warp/relay-entrypoint.sh:/usr/local/bin/relay-entrypoint.sh:ro
+      - ../instacloud-warp/relay-watchdog.sh:/usr/local/bin/relay-watchdog.sh:ro
     cap_drop:
       - ALL
     security_opt:
@@ -109,6 +128,9 @@ services:
       RELAY_API_URL: "http://127.0.0.1:11081"
       RELAY_API_TOKEN: "${RELAY_API_TOKEN:-}"
       RELAY_EGRESS_INTERVAL: "${RELAY_EGRESS_INTERVAL:-60}"
+      RELAY_PORT_COUNT: "${RELAY_COUNT:-24}"
+      POOL_BURNED_FILE: /shared/burned-prefix64.tsv
+      SOCKS_PASS: "${SOCKS_PASS:-}"
       ADMIN_PASS: "${ADMIN_PASS:-}"
       SERVER_KEY: "${SERVER_KEY:-}"
       TZ: "${TZ:-UTC}"
@@ -116,6 +138,8 @@ services:
       - ${DATA_ROOT:-./data}/gateway:/var/lib/opencode2api
       - ./config.seed.json:/run/o2a/config.seed.json:ro
       - ./gateway-boot.sh:/run/o2a/gateway-boot.sh:ro
+      - ../pool-sync.sh:/usr/local/bin/pool-sync.sh:ro
+      - ${DATA_ROOT:-./data}/shared:/shared
     read_only: true
     tmpfs:
       - /tmp
@@ -141,8 +165,15 @@ services:
       PUBLIC_PORT: "${EDGE_PUBLIC_PORT:-443}"
       PUBLIC_TLS: "${EDGE_PUBLIC_TLS:-1}"
       TZ: "${TZ:-UTC}"
+      SOCKS_ENABLED: "1"
+      SOCKS_PORT: "${EDGE_SOCKS_PORT:-11080}"
+      SOCKS_LISTEN: "0.0.0.0"
+      SUB_TOKEN: "${EDGE_SUB_TOKEN:-}"
+      SOCKS_USER: "${EDGE_SOCKS_USER:-o2a}"
+      SOCKS_PASS: "${EDGE_SOCKS_PASS:-}"
     ports:
       - "${EDGE_PORT:-8443}:${EDGE_NODE_PORT:-8443}"
+      - "127.0.0.1:${EDGE_SOCKS_PORT:-11080}:${EDGE_SOCKS_PORT:-11080}"
     volumes:
       - ${DATA_ROOT:-./data}/node:/data
     security_opt:

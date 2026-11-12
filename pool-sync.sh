@@ -1,243 +1,140 @@
 #!/bin/sh
-# pool-sync.sh - keep the main container's static SOCKS list in sync with the
-# pool management API. Every integration parameter comes from the environment
-# (or from the optional env file), nothing is baked in.
-#
-# Modes:
-#   pool-sync.sh                 one fetch; reload only when the list changed
-#   pool-sync.sh --fetch-only    one fetch; never reload
-#   pool-sync.sh --loop [SEC]    fetch every SEC seconds (default 60)
-#
-# Environment:
-#   POOL_API_URL        base URL of the pool control plane, e.g.
-#                       http://POOL_PRIVATE_HOST:1081 (legacy single pool,
-#                       used only when POOL_STATE_FILE has no pools list)
-#   POOL_API_TOKEN      bearer token for /api/v1/* (legacy single pool)
-#   POOL_STATE_FILE     proxy center state with the managed pool list
-#                       (default: $STATE_DIR/proxycenter/state.json)
-#   POOL_ENV_FILE       optional env file sourced before the above
-#                       (default: $STATE_DIR/upgrade/pool.env)
-#   POOL_SYNC_SCOPE     private | public (default: private, legacy only)
-#   EGRESS_FILE         list written for the gateway
-#                       (default: $STATE_DIR/egress-ext.txt)
-#   ADMIN_API           local gateway base URL (default: http://127.0.0.1:8081)
-#   ADMIN_USER          WebUI user for the reload call (default: admin)
-#   ADMIN_PASS          WebUI password; when empty, ADMIN_PASS_FILE is read
-#   ADMIN_PASS_FILE     default: $STATE_DIR/upgrade/admin.pass
-#   POOL_SYNC_RELOAD    1 = reload after a changed list, 0 = fetch only
-#   POOL_SYNC_INTERVAL  default loop interval in seconds (default: 60)
-#   RELOAD_TIMEOUT      curl timeout for /api/config/reload (default: 900)
-#   RELOAD_RETRIES      login+reload attempts (default: 3)
-#   RELOAD_RETRY_DELAY  seconds between attempts (default: 15)
-set -u
+# pool-sync.sh - fused egress sync (v3, probe-fresh)
+# Probe every slot through its mux user to learn the current /64, then publish
+# one direct SOCKS endpoint per unique prefix. Relay first, local WARP second.
+set +u
 
-BASE="${STATE_DIR:-/var/lib/opencode2api}"
-ENVF="${POOL_ENV_FILE:-$BASE/upgrade/pool.env}"
-POOL_STATE_FILE="${POOL_STATE_FILE:-$BASE/proxycenter/state.json}"
-EGRESS="${EGRESS_FILE:-$BASE/egress-ext.txt}"
-LOG="${POOL_SYNC_LOG:-$BASE/upgrade/pool-sync.log}"
-LOCK="${POOL_SYNC_LOCK:-/tmp/pool-sync.lock}"
-ADMIN_API="${ADMIN_API:-http://127.0.0.1:8081}"
-ADMIN_USER="${ADMIN_USER:-admin}"
-ADMIN_PASS="${ADMIN_PASS:-}"
-ADMIN_PASS_FILE="${ADMIN_PASS_FILE:-$BASE/upgrade/admin.pass}"
-POOL_SYNC_SCOPE="${POOL_SYNC_SCOPE:-private}"
-POOL_SYNC_RELOAD="${POOL_SYNC_RELOAD:-1}"
-POOL_SYNC_INTERVAL="${POOL_SYNC_INTERVAL:-60}"
-POOL_HTTP_TIMEOUT="${POOL_HTTP_TIMEOUT:-10}"
-RELOAD_TIMEOUT="${RELOAD_TIMEOUT:-900}"
-RELOAD_RETRIES="${RELOAD_RETRIES:-3}"
-RELOAD_RETRY_DELAY="${RELOAD_RETRY_DELAY:-15}"
+BASE=/var/lib/opencode2api
+EGRESS=$BASE/egress-ext.txt
+LOG=$BASE/upgrade/pool-sync.log
+ADMIN_API=http://127.0.0.1:8081
+ADMIN_USER=admin
+ADMIN_PASS_FILE=$BASE/upgrade/admin.pass
+SOCKS_USER=warpuser
+PROBE_URL=$PROBE_URL
+[ -n "$PROBE_URL" ] || PROBE_URL='https://[2606:4700:4700::1111]/cdn-cgi/trace'
+PROBE_TIMEOUT=$PROBE_TIMEOUT
+[ -n "$PROBE_TIMEOUT" ] || PROBE_TIMEOUT=10
+PROBE_JOBS=$PROBE_JOBS
+[ -n "$PROBE_JOBS" ] || PROBE_JOBS=8
+RELAY_START=$RELAY_PORT_START
+[ -n "$RELAY_START" ] || RELAY_START=1594
+RELAY_COUNT=$RELAY_PORT_COUNT
+[ -n "$RELAY_COUNT" ] || RELAY_COUNT=24
+WARP_START=$WARP_PORT_START
+[ -n "$WARP_START" ] || WARP_START=1578
+WARP_COUNT=$WARP_PORT_COUNT
+[ -n "$WARP_COUNT" ] || WARP_COUNT=16
+BURNED_FILE=$POOL_BURNED_FILE
+[ -n "$BURNED_FILE" ] || BURNED_FILE=/shared/burned-prefix64.tsv
+BURNED_TTL=$BURNED_TTL
+[ -n "$BURNED_TTL" ] || BURNED_TTL=64800
+RELOAD_TIMEOUT=$RELOAD_TIMEOUT
+[ -n "$RELOAD_TIMEOUT" ] || RELOAD_TIMEOUT=900
+RELOAD_RETRIES=$RELOAD_RETRIES
+[ -n "$RELOAD_RETRIES" ] || RELOAD_RETRIES=3
+RELOAD_RETRY_DELAY=$RELOAD_RETRY_DELAY
+[ -n "$RELOAD_RETRY_DELAY" ] || RELOAD_RETRY_DELAY=15
+INTERVAL=$POOL_SYNC_INTERVAL
+[ -n "$INTERVAL" ] || INTERVAL=60
 
 MODE=once
-LOOP_INTERVAL="$POOL_SYNC_INTERVAL"
-case "${1:-}" in
+case "$1" in
   --fetch-only) MODE=fetch ;;
-  --loop)
-    MODE=loop
-    [ -n "${2:-}" ] && LOOP_INTERVAL="$2"
-    ;;
-  --once | "") ;;
-  *)
-    printf '%s\n' "usage: $0 [--once|--fetch-only|--loop [SEC]]" >&2
-    exit 2
-    ;;
+  --loop) MODE=loop; [ -n "$2" ] && INTERVAL=$2 ;;
 esac
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
-log() { echo "$(date -u +%FT%TZ) $*" >>"$LOG" 2>/dev/null || true; }
+log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$LOG" 2>/dev/null || true; }
 
-[ -f "$ENVF" ] && . "$ENVF"
-
-# pools_from_state prints "id<TAB>api_url<TAB>token<TAB>scope" for every
-# enabled pool the proxy center manages. Exit 0 means the state file is
-# authoritative (even when the list is empty); exit 1 means fall back to the
-# legacy POOL_API_URL environment.
-pools_from_state() {
-  [ -f "$POOL_STATE_FILE" ] || return 1
-  command -v jq >/dev/null 2>&1 || return 1
-  initialized=$(jq -r '.pools_initialized // false' "$POOL_STATE_FILE" 2>/dev/null) || return 1
-  [ "$initialized" = "true" ] || return 1
-  jq -r '.pools[]? | select(.enabled == true) |
-    [(.id // ""), (.api_url // ""), (.token // ""), (.scope // "private")] | @tsv' \
-    "$POOL_STATE_FILE" 2>/dev/null
+burned_clean() {
+  [ -s "$BURNED_FILE" ] || return 0
+  now=$(date +%s)
+  tmp="$BURNED_FILE.tmp.$$"
+  awk -F '\t' -v now="$now" -v ttl="$BURNED_TTL" 'NF>=1 && $1!="" {ts=($2 ~ /^[0-9]+$/)?$2:0; if(ts==0 || now-ts<ttl) print $1 "\t" ts}' "$BURNED_FILE" >"$tmp" 2>/dev/null && mv -f "$tmp" "$BURNED_FILE"
+  rm -f "$tmp" 2>/dev/null || true
 }
 
-fetch_pool() {
-  # fetch_pool URL TOKEN SCOPE OUTFILE -> curl http status code
-  url=$1
-  token=$2
-  scope=$3
-  out=$4
-  case "$scope" in
-    public) : ;;
-    *) scope=private ;;
+probe_one() {
+  port=$1; mux=$2; user=$3; out=$4
+  res=$(curl -sS -m "$PROBE_TIMEOUT" --socks5-hostname "$user:$SOCKS_PASS@127.0.0.1:$mux" "$PROBE_URL" 2>/dev/null) || return 1
+  ip=$(printf '%s\n' "$res" | sed -n 's/^ip=//p' | head -1)
+  warp=$(printf '%s\n' "$res" | sed -n 's/^warp=//p' | head -1)
+  loc=$(printf '%s\n' "$res" | sed -n 's/^loc=//p' | head -1)
+  [ "$warp" = "on" ] || return 1
+  case "$ip" in
+    *:*) ;;
+    *) return 1 ;;
   esac
-  code=$(curl -sS -m "$POOL_HTTP_TIMEOUT" \
-    -H "Authorization: Bearer ${token:-}" \
-    -o "$out" -w '%{http_code}' \
-    "$url/api/v1/endpoints?scope=$scope" 2>/dev/null) || code=000
-  printf '%s' "$code"
+  prefix=$(printf '%s' "$ip" | cut -d: -f1-4)
+  printf '%s\t%s\t%s\t%s\n' "$prefix" "$port" "$loc" "$mux" >"$out"
+}
+
+collect() {
+  start=$1; count=$2; mux=$3; tag=$4
+  i=0; n=$start; end=$((start+count))
+  while [ "$n" -lt "$end" ]; do
+    idx=$((n-start+1))
+    user=$(printf 'warpuser%02d' "$idx")
+    probe_one "$n" "$mux" "$user" "$TMP/$tag.$n" &
+    i=$((i+1))
+    [ $((i % PROBE_JOBS)) -eq 0 ] && wait
+    n=$((n+1))
+  done
+  wait
 }
 
 fetch_once() {
+  burned_clean
+  TMP=$(mktemp -d /tmp/poolsync.XXXXXX) || return 1
+  collect "$RELAY_START" "$RELAY_COUNT" 11081 r
+  collect "$WARP_START" "$WARP_COUNT" 1081 w
   tmp="$EGRESS.tmp.$$"
-  merged="$EGRESS.merge.$$"
-  list="$EGRESS.pools.$$"
-  : >"$merged"
-
-  if pools_from_state >"$list"; then
-    enabled=0
-    succeeded=0
-    tab=$(printf '\t')
-    while IFS="$tab" read -r pid api token scope; do
-      [ -n "$api" ] || continue
-      enabled=$((enabled + 1))
-      part="$EGRESS.part.$$.$enabled"
-      code=$(fetch_pool "$api" "$token" "$scope" "$part")
-      if [ "$code" = "200" ] && [ -s "$part" ] && grep -q '^socks5://' "$part" 2>/dev/null; then
-        succeeded=$((succeeded + 1))
-        cat "$part" >>"$merged"
-        log "pool $pid fetched http=200 endpoints=$(grep -c '^socks5://' "$part" 2>/dev/null || echo 0)"
-      else
-        log "pool $pid fetch failed http=$code; skipped"
-      fi
-      rm -f "$part"
-    done <"$list"
-    rm -f "$list"
-    if [ "$enabled" -eq 0 ]; then
-      log "no enabled pools in state; sync skipped"
-      rm -f "$tmp" "$merged"
-      return 0
-    fi
-    if [ "$succeeded" -eq 0 ]; then
-      log "all $enabled pools failed; keeping current list"
-      rm -f "$tmp" "$merged"
-      return 1
-    fi
-  else
-    rm -f "$list"
-    if [ -z "${POOL_API_URL:-}" ]; then
-      log "POOL_API_URL not set; sync skipped"
-      rm -f "$tmp" "$merged"
-      return 0
-    fi
-    code=$(fetch_pool "$POOL_API_URL" "${POOL_API_TOKEN:-}" "$POOL_SYNC_SCOPE" "$merged")
-    if [ "$code" != "200" ] || [ ! -s "$merged" ]; then
-      size=$(wc -c <"$merged" 2>/dev/null || echo 0)
-      log "fetch failed http=$code size=$size; keeping current list"
-      rm -f "$tmp" "$merged"
-      return 1
-    fi
-  fi
-
-  grep '^socks5://' "$merged" 2>/dev/null | awk '!seen[$0]++' >"$tmp" || true
-  if [ -f "${RELAY_EGRESS_FILE:-$BASE/relay-egress.txt}" ]; then
-    grep '^socks5://' "${RELAY_EGRESS_FILE:-$BASE/relay-egress.txt}" 2>/dev/null >>"$tmp" || true
-  fi
-  n=$(grep -c '^socks5://' "$tmp" 2>/dev/null || true)
-  rm -f "$merged"
-  if [ "${n:-0}" -eq 0 ]; then
-    log "fetch returned no socks5:// lines; keeping current list"
-    rm -f "$tmp"
-    return 1
-  fi
-
-  if cmp -s "$tmp" "$EGRESS"; then
-    rm -f "$tmp"
-    return 0
-  fi
-
+  cat "$TMP"/r.* "$TMP"/w.* 2>/dev/null | awk -F '\t' -v burned="$BURNED_FILE" -v u="$SOCKS_USER" -v p="$SOCKS_PASS" '
+    BEGIN { while ((getline line < burned) > 0) { split(line,b,"\t"); if (b[1]!="") bs[b[1]]=1 } close(burned) }
+    ($1!="" && $2!="" && !bs[$1] && !seen[$1]++) { printf "socks5://%s:%s@127.0.0.1:%s#%s\n", u, p, $2, $1 }' >"$tmp"
+  n=$(wc -l <"$tmp" | tr -d ' ')
+  rm -rf "$TMP"
+  case "$n" in ''|0) log "probe list empty; keeping current"; rm -f "$tmp"; return 1 ;; esac
+  if cmp -s "$tmp" "$EGRESS"; then rm -f "$tmp"; return 0; fi
   cp "$tmp" "$EGRESS" && chmod 644 "$EGRESS"
   rm -f "$tmp"
-  log "egress list updated: $n endpoints"
+  log "egress updated: $n endpoints"
   return 2
 }
 
 reload_gateway() {
-  [ "$POOL_SYNC_RELOAD" = "1" ] || return 0
-  if [ -z "$ADMIN_PASS" ]; then
-    [ -f "$ADMIN_PASS_FILE" ] || {
-      log "no admin password (ADMIN_PASS/ADMIN_PASS_FILE); reload skipped"
-      return 0
-    }
-    ADMIN_PASS=$(cat "$ADMIN_PASS_FILE")
-  fi
-  command -v jq >/dev/null 2>&1 || {
-    log "jq not found; reload skipped"
-    return 0
-  }
-
-  if ! mkdir "$LOCK" 2>/dev/null; then
-    log "reload already in progress; list saved for next reload"
-    return 0
-  fi
-  trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
-
-  ck=$(mktemp /tmp/pool-ck.XXXXXX)
-  body=$(mktemp /tmp/pool-reload.XXXXXX)
+  [ -n "$ADMIN_PASS" ] || { [ -f "$ADMIN_PASS_FILE" ] && ADMIN_PASS=$(cat "$ADMIN_PASS_FILE"); }
+  if [ -z "$ADMIN_PASS" ]; then log "no admin password; reload skipped"; return 0; fi
+  command -v jq >/dev/null 2>&1 || { log "jq missing; reload skipped"; return 0; }
+  LOCK=/tmp/pool-sync.lock
+  mkdir "$LOCK" 2>/dev/null || { log "reload busy"; return 0; }
+  ck=$(mktemp /tmp/ck.XXXXXX); body=$(mktemp /tmp/rl.XXXXXX)
   i=0
   while [ "$i" -lt "$RELOAD_RETRIES" ]; do
     json=$(jq -n --arg u "$ADMIN_USER" --arg p "$ADMIN_PASS" '{username:$u,password:$p}')
-    csrf=$(curl -sS -m 15 -c "$ck" -X POST "$ADMIN_API/api/auth/login" \
-      -H 'Content-Type: application/json' -d "$json" | jq -r '.csrf_token // empty')
-    if [ -z "$csrf" ]; then
+    csrf=$(curl -sS -m 15 -c "$ck" -X POST "$ADMIN_API/api/auth/login" -H 'Content-Type: application/json' -d "$json" | jq -r '.csrf_token // empty')
+    if [ -n "$csrf" ]; then
+      rc=$(curl -sS -m "$RELOAD_TIMEOUT" -b "$ck" -H "X-CSRF-Token: $csrf" -o "$body" -w '%{http_code}' -X POST "$ADMIN_API/api/config/reload" -H 'Content-Type: application/json' -d '{}')
+      log "reload attempt $i -> $rc $(head -c 160 "$body" 2>/dev/null)"
+      [ "$rc" = "200" ] && break
+    else
       log "login failed; retry $i"
-      i=$((i + 1))
-      sleep "$RELOAD_RETRY_DELAY"
-      continue
     fi
-    rc=$(curl -sS -m "$RELOAD_TIMEOUT" -b "$ck" -H "X-CSRF-Token: $csrf" \
-      -o "$body" -w '%{http_code}' \
-      -X POST "$ADMIN_API/api/config/reload" \
-      -H 'Content-Type: application/json' -d '{}')
-    log "reload attempt $i -> $rc $(head -c 160 "$body" 2>/dev/null)"
-    [ "$rc" = "200" ] && break
-    i=$((i + 1))
-    sleep "$RELOAD_RETRY_DELAY"
+    i=$((i+1)); sleep "$RELOAD_RETRY_DELAY"
   done
-  rm -f "$ck" "$body"
-  rmdir "$LOCK" 2>/dev/null
-  trap - EXIT INT TERM
+  rm -f "$ck" "$body"; rmdir "$LOCK" 2>/dev/null
 }
 
 run_once() {
-  fetch_once
-  rc=$?
-  case "$MODE" in
-    fetch) return "$rc" ;;
-    *) [ "$rc" = "2" ] && reload_gateway ;;
-  esac
+  fetch_once; rc=$?
+  case "$MODE" in fetch) return "$rc" ;; esac
+  [ "$rc" = "2" ] && reload_gateway
   return "$rc"
 }
 
-
 if [ "$MODE" = "loop" ]; then
-  log "pool sync loop started: interval=${LOOP_INTERVAL}s state=${POOL_STATE_FILE} legacy_url=${POOL_API_URL:-unset}"
-  while :; do
-    run_once
-    sleep "$LOOP_INTERVAL"
-  done
+  log "probe sync loop: relay=$RELAY_START+$RELAY_COUNT warp=$WARP_START+$WARP_COUNT interval=$INTERVAL"
+  while :; do run_once; sleep "$INTERVAL"; done
 fi
-
 run_once

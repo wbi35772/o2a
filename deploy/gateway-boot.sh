@@ -49,22 +49,4 @@ if [ ! -s "$ADMIN_PASS_FILE" ] && [ -n "${ADMIN_PASS:-}" ]; then
     chmod 600 "$ADMIN_PASS_FILE"
 fi
 
-# Mirror the relay endpoints into relay-egress.txt. pool-sync appends this file
-# to the WARP pool list and reloads the gateway when the merged list changes.
-relay_loop() {
-    tmp="$BASE/relay-egress.txt.tmp"
-    while :; do
-        if curl -fsS -m 10 \
-            ${RELAY_API_TOKEN:+-H "Authorization: Bearer $RELAY_API_TOKEN"} \
-            "$RELAY_API_URL/api/v1/endpoints?scope=private" -o "$tmp" 2>/dev/null \
-            && grep -q '^socks5://' "$tmp"; then
-            mv "$tmp" "$BASE/relay-egress.txt"
-        fi
-        sleep "${RELAY_EGRESS_INTERVAL:-60}"
-    done
-}
-if [ -n "${RELAY_API_URL:-}" ]; then
-    relay_loop &
-fi
-
 exec /usr/local/bin/opencode2api -config "$CFG"

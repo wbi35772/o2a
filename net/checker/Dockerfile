@@ -6,6 +6,7 @@ FROM ${GO_IMAGE} AS build
 WORKDIR /src
 COPY go.mod ./
 COPY *.go ./
+COPY ui.html ./
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/checker ./
 
 FROM ${RUNTIME_IMAGE}

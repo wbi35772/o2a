@@ -165,17 +165,48 @@ func (a *Server) csrf(next http.Handler) http.Handler {
 		}
 		if origin := r.Header.Get("Origin"); origin != "" {
 			parsed, err := url.Parse(origin)
+			secure := requestIsSecure(r)
 			expectedScheme := "http"
-			if requestIsSecure(r) {
+			if secure {
 				expectedScheme = "https"
 			}
-			if err != nil || !strings.EqualFold(parsed.Host, r.Host) || !strings.EqualFold(parsed.Scheme, expectedScheme) {
+			if err != nil || !strings.EqualFold(parsed.Scheme, expectedScheme) || !originHostAllowed(parsed.Host, r, secure) {
 				writeAdminError(w, http.StatusForbidden, "origin_failed", "request origin does not match this server")
 				return
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// originHostAllowed reports whether the Origin header host names this server.
+// Behind a TLS-terminating edge the backend sees Host 127.0.0.1:PORT while the
+// browser used the public host, which the edge records in X-Forwarded-Host.
+func originHostAllowed(originHost string, r *http.Request, secure bool) bool {
+	candidates := []string{r.Host}
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwarded != "" {
+		if i := strings.IndexByte(forwarded, ','); i >= 0 {
+			forwarded = strings.TrimSpace(forwarded[:i])
+		}
+		if forwarded != "" {
+			candidates = append(candidates, forwarded)
+		}
+	}
+	for _, host := range candidates {
+		if host == "" {
+			continue
+		}
+		if strings.EqualFold(originHost, host) {
+			return true
+		}
+		if secure && strings.EqualFold(originHost, host+":443") {
+			return true
+		}
+		if !secure && strings.EqualFold(originHost, host+":80") {
+			return true
+		}
+	}
+	return false
 }
 
 // handleAccount changes the WebUI username and/or password after verifying the

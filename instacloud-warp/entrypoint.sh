@@ -514,17 +514,18 @@ generate_profile() {
 }
 
 bring_up() {
-  local i=$1 dir port ep res prefix ip loc pid
+  local i=$1 dir port ep res prefix ip loc pid chain_port
   dir=$(inst_dir "$i")
+  chain_port=${REGISTER_CHAIN_PORT:-1594}
   port=$(port_for "$i")
   mkdir -p "$dir"
   if ! account_valid "$dir"; then
-    if ! register_instance "$dir" "$LAST_WORKING_PORT"; then
+    if ! register_instance "$dir" "$chain_port"; then
       status_set "$port" 0 "" "" "" "register-failed"
       return 1
     fi
   fi
-  if ! generate_profile "$dir" "$LAST_WORKING_PORT"; then
+  if ! generate_profile "$dir" "$chain_port"; then
     status_set "$port" 0 "" "" "" "generate-failed"
     return 1
   fi
@@ -680,7 +681,7 @@ detect_host() {
 }
 
 write_egress() {
-  local i port state out="$STATE_DIR/egress-ext.txt"
+  local i port state out="$STATE_DIR/pool-egress.txt"
   [[ -n "$PUBLIC_HOST" ]] || PUBLIC_HOST="${POOL_PUBLIC_HOST:-$(detect_host)}"
   : >"$out"
   for ((i = 1; i <= INSTANCE_COUNT; i++)); do
