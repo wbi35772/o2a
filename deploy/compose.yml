@@ -20,6 +20,7 @@ services:
     command:
       - |
         set -eu
+        chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/relay-entrypoint.sh /usr/local/bin/relay-watchdog.sh 2>/dev/null || true
         mkdir -p /data/instances /data/relay-root/relay
         chown -R warp:warp /data
     volumes:
