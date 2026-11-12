@@ -984,11 +984,12 @@ main() {
     log "relay not configured (missing nodes.tsv or host/password in $SETTINGS_FILE); mux and API only"
   fi
 
-  local next_health next_sync now ns nodes_stamp cur_nodes
+  local next_health next_sync next_dedup now ns nodes_stamp cur_nodes
   nodes_stamp=$(stat -c %Y "$NODES_FILE" 2>/dev/null || printf 0)
   nodes_stamp+="-$(cksum <"$NODES_FILE" 2>/dev/null | awk '{print $1"-"$2}')"
   next_health=$(($(date +%s) + HEALTH_INTERVAL))
   next_sync=$(($(date +%s) + RELAY_SYNC_INTERVAL))
+  next_dedup=$(($(date +%s) + ${DEDUP_INTERVAL:-900}))
   while :; do
     sleep 5
     now=$(date +%s)
@@ -1037,6 +1038,10 @@ main() {
       if ((now >= next_health)); then
         health_pass
         next_health=$(($(date +%s) + HEALTH_INTERVAL))
+      fi
+      if ((now >= next_dedup)); then
+        dedup_pass
+        next_dedup=$(($(date +%s) + ${DEDUP_INTERVAL:-900}))
       fi
     fi
   done
