@@ -65,72 +65,118 @@ RELAY_COUNT=$((10#$RELAY_COUNT))
 
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
 
-refresh_status() {
-  local i port dir res prefix ip loc pid ok=0 failed=()
-  load_secrets
-  reload_settings
-  validate_env
-  for ((i = 1; i <= RELAY_COUNT; i++)); do
-    port=$((SING_PORT_BASE + i - 1))
-    dir="$STATE_DIR/relay/instances/$(printf 'n%02d' "$i")"
+
+_worker_recover() {
+  local i=$1 workdir=$2 port dir res prefix ip loc pid
+  port=$((SING_PORT_BASE + i - 1))
+  dir="$STATE_DIR/relay/instances/$(printf 'n%02d' "$i")"
+  _worker_status_shadow "$workdir"
+  log "recover n$(printf '%02d' "$i") port=$port"
+  badacct_bump "$i"
+  res=""
+  if recover_session "$i" >>"$RELAY_LOG" 2>&1; then
+    res=$(probe "$port" 2>/dev/null || true)
+    if [[ -n "$res" ]]; then
+      IFS=$'\t' read -r prefix ip loc <<<"$res"
+      pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
+      status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "ok"
+      slot_backoff_ok "$i"
+      node_event "$(session_node_index "$i")" ok
+      badacct_reset "$i"
+      log "recovered n$(printf '%02d' "$i") prefix=$prefix"
+      return 0
+    fi
+    log "recover n$(printf '%02d' "$i") still failing"
+  else
+    log "recover n$(printf '%02d' "$i") failed (register/up error)"
+  fi
+  log "rebind n$(printf '%02d' "$i") port=$port after failed recovery"
+  if rotate_session "$i" >>"$RELAY_LOG" 2>&1; then
     res=$(probe "$port" 2>/dev/null || true)
     pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
     if [[ -n "$res" ]]; then
       IFS=$'\t' read -r prefix ip loc <<<"$res"
       status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "ok"
+      slot_backoff_ok "$i"
+      node_event "$(session_node_index "$i")" ok
+      badacct_reset "$i"
+      log "rebound n$(printf '%02d' "$i") prefix=$prefix"
+      return 0
+    fi
+    status_set "$port" "$pid" "$(session_endpoint "$i")" "" "" "probe-failed"
+    log "rebind n$(printf '%02d' "$i") still failing"
+  fi
+  if maybe_replace_account "$i"; then
+    log "account replaced n$(printf '%02d' "$i"); recovering with new account"
+    if recover_session "$i" >>"$RELAY_LOG" 2>&1; then
+      res=$(probe "$port" 2>/dev/null || true)
+      if [[ -n "$res" ]]; then
+        IFS=$'\t' read -r prefix ip loc <<<"$res"
+        pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
+        status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "ok"
+        slot_backoff_ok "$i"
+        node_event "$(session_node_index "$i")" ok
+        badacct_reset "$i"
+        log "recovered n$(printf '%02d' "$i") after account replace prefix=$prefix"
+        return 0
+      fi
+    fi
+  fi
+  slot_backoff_fail "$i"
+  node_event "$(session_node_index "$i")" fail
+  return 1
+}
+
+refresh_status() {
+  local i port res prefix ip loc pid ok=0 workdir="$STATE_DIR/probe-work"
+  local -a idx=() failed=()
+  load_secrets
+  reload_settings
+  validate_env
+  for ((i = 1; i <= RELAY_COUNT; i++)); do idx+=("$i"); done
+  if [[ -s "$NODE_EVENTS_FILE" ]] && (( $(wc -l <"$NODE_EVENTS_FILE") > 4000 )); then
+    tail -n 2000 "$NODE_EVENTS_FILE" >"$NODE_EVENTS_FILE.tmp" && mv -f "$NODE_EVENTS_FILE.tmp" "$NODE_EVENTS_FILE"
+  fi
+  rm -rf "$workdir"
+  mkdir -p "$workdir"
+  WORKER_FN=_worker_probe
+  _pool_run "$workdir" "${idx[@]}"
+  for i in "${idx[@]}"; do
+    port=$((SING_PORT_BASE + i - 1))
+    res=""
+    [[ -f "$workdir/probe.$i" ]] && IFS=$'\t' read -r _ port res <"$workdir/probe.$i"
+    prefix=""
+    ip=""
+    loc=""
+    pid=$(cat "$STATE_DIR/relay/instances/$(printf 'n%02d' "$i")/sing-box.pid" 2>/dev/null || printf '0')
+    if [[ -n "$res" ]]; then
+      IFS=$'\t' read -r prefix ip loc <<<"$res"
+      status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "ok"
       ok=$((ok + 1))
+      slot_backoff_ok "$i"
+      node_event "$(session_node_index "$i")" ok
+      badacct_reset "$i"
     else
       status_set "$port" "$pid" "$(session_endpoint "$i")" "" "" "probe-failed"
-      failed+=("$i")
+      node_event "$(session_node_index "$i")" fail
+      if slot_in_backoff "$i"; then
+        local _rec _next
+        _rec=$(slot_fails_get "$i")
+        _next=$(printf '%s' "$_rec" | cut -f2)
+        log "backoff n$(printf '%02d' "$i") retry in $(( _next - $(date +%s) ))s"
+      else
+        failed+=("$i")
+      fi
     fi
   done
   flush_status
   log "status refreshed: ok=$ok/$RELAY_COUNT failed=${#failed[@]}"
-
-  # Recover at most RECOVER_PER_ROUND failed sessions per pass, so a flapping
-  # subscription node does not trigger a re-register storm across all tunnels.
-  local n=0 idx
-  for idx in "${failed[@]}"; do
-    ((n >= RECOVER_PER_ROUND)) && break
-    port=$((SING_PORT_BASE + idx - 1))
-    dir="$STATE_DIR/relay/instances/$(printf 'n%02d' "$idx")"
-    res=""
-    log "recover n$(printf '%02d' "$idx") port=$port"
-    if recover_session "$idx" >>"$RELAY_LOG" 2>&1; then
-      res=$(probe "$port" 2>/dev/null || true)
-      pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
-      if [[ -n "$res" ]]; then
-        IFS=$'\t' read -r prefix ip loc <<<"$res"
-        status_set "$port" "$pid" "$(session_endpoint "$idx")" "$prefix" "$loc" "ok"
-        log "recovered n$(printf '%02d' "$idx") prefix=$prefix"
-      else
-        status_set "$port" "$pid" "$(session_endpoint "$idx")" "" "" "probe-failed"
-        log "recover n$(printf '%02d' "$idx") still failing"
-      fi
-    else
-      log "recover n$(printf '%02d' "$idx") failed (register/up error)"
-    fi
-    if [[ -z "$res" ]]; then
-      log "rebind n$(printf '%02d' "$idx") port=$port after failed recovery"
-      if rebind_session "$idx" >>"$RELAY_LOG" 2>&1; then
-        res=$(probe "$port" 2>/dev/null || true)
-        pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
-        if [[ -n "$res" ]]; then
-          IFS=$'	' read -r prefix ip loc <<<"$res"
-          status_set "$port" "$pid" "$(session_endpoint "$idx")" "$prefix" "$loc" "ok"
-          log "rebound n$(printf '%02d' "$idx") prefix=$prefix"
-        else
-          status_set "$port" "$pid" "$(session_endpoint "$idx")" "" "" "probe-failed"
-          log "rebind n$(printf '%02d' "$idx") still failing"
-        fi
-      fi
-    fi
-    n=$((n + 1))
-  done
-  if ((n > 0)); then
-    flush_status
-    log "after recovery: $(awk -F'\t' '$6=="ok"{c++} END{print c+0}' "$STATUS_FILE")/${RELAY_COUNT} ok"
-  fi
+  (( ${#failed[@]} )) || return 0
+  WORKER_FN=_worker_recover
+  _pool_run "$workdir" "${failed[@]}"
+  _pool_collect "$workdir"
+  flush_status
+  log "after recovery: $(awk -F'\t' '$6=="ok"{c++} END{print c+0}' "$STATUS_FILE")/${RELAY_COUNT} ok"
 }
 
 mkdir -p "$STATE_DIR"

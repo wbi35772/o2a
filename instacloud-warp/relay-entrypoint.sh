@@ -31,6 +31,13 @@ SOCKS_USER="${SOCKS_USER:-warpuser}"
 RELAY_PORT="${RELAY_PORT:-443}"
 RELAY_WS_PATH="${RELAY_WS_PATH:-/pgtrojan}"
 RELAY_START_STAGGER="${RELAY_START_STAGGER:-2.5}"
+# Parallel job width for bring-up, probe and recovery passes. Registration and
+# probes are network bound; running RELAY_START_JOBS at a time keeps boot and
+# recovery O(N/JOBS) instead of O(N). Raise it with the session count.
+RELAY_START_JOBS="${RELAY_START_JOBS:-16}"
+[[ "$RELAY_START_JOBS" =~ ^[0-9]+$ ]] || RELAY_START_JOBS=16
+(( RELAY_START_JOBS >= 1 )) || RELAY_START_JOBS=16
+
 RELAY_PROBE_URL="${RELAY_PROBE_URL:-https://[2606:4700:4700::1111]/cdn-cgi/trace}"
 RELAY_PROBE_TIMEOUT="${RELAY_PROBE_TIMEOUT:-8}"
 HEALTH_INTERVAL="${HEALTH_INTERVAL:-300}"
@@ -51,6 +58,19 @@ BURNED_FILE="${BURNED_FILE:-$STATE_DIR/burned-prefix64.tsv}"
 REROLL_QUEUE="${REROLL_QUEUE:-$RELAY_DIR/reroll.queue}"
 SESSION_MAP_FILE="${SESSION_MAP_FILE:-$RELAY_DIR/session-nodes.tsv}"
 NODE_COOLING_SECONDS="${NODE_COOLING_SECONDS:-1800}"
+RELAY_MAX_PER_NODE="${RELAY_MAX_PER_NODE:-8}"
+RELAY_ACCT_REREG_AFTER="${RELAY_ACCT_REREG_AFTER:-2}"
+RELAY_ACCT_REREG_COOLDOWN="${RELAY_ACCT_REREG_COOLDOWN:-900}"
+REGISTER_TIMEOUT="${REGISTER_TIMEOUT:-20}"
+GENERATE_TIMEOUT="${GENERATE_TIMEOUT:-15}"
+RELAY_BACKOFF_BASE="${RELAY_BACKOFF_BASE:-120}"
+RELAY_BACKOFF_MAX="${RELAY_BACKOFF_MAX:-1800}"
+NODE_BAD_STREAK="${NODE_BAD_STREAK:-3}"
+NODE_QUARANTINE_SECONDS="${NODE_QUARANTINE_SECONDS:-900}"
+NODE_EVENTS_FILE="$STATE_DIR/node-events.log"
+REGISTER_COOLDOWN="${REGISTER_COOLDOWN:-180}"
+RELAY_REGISTER_JOBS="${RELAY_REGISTER_JOBS:-3}"
+REGISTER_COOLDOWN_FILE="$STATE_DIR/register-cooldown"
 
 RELAY_API_TOKEN="${RELAY_API_TOKEN:-}"
 RELAY_HOST_ENV="${RELAY_HOST:-}"
@@ -185,8 +205,22 @@ load_nodes() {
 # Fetch the Clash subscription and rewrite nodes.tsv. The file is only
 # replaced when the parsed node list actually changed, so an unchanged
 # subscription does not trigger a session rebuild through settings_sig().
+merge_extra_nodes() {
+  local extra="${RELAY_EXTRA_NODES_FILE:-/data/relay-extra-nodes.tsv}"
+  [[ -s "$extra" && -s "$NODES_FILE" ]] || return 0
+  local tmp="$NODES_FILE.merge.$$"
+  if awk -v nmax="${RELAY_NODE_MAX:-64}" '
+    FNR==NR { if (NF>=6) { k=$6; if (!(k in seen)) { seen[k]=1; print; cnt++ } } next }
+    NF>=6 { k=$6; if (!(k in seen) && cnt+0 < nmax+0) { seen[k]=1; print; cnt++ } }
+  ' "$NODES_FILE" "$extra" >"$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$NODES_FILE"
+  else
+    rm -f "$tmp"
+  fi
+}
+
 sync_nodes() {
-  [[ -n "$RELAY_SUB_URL" ]] || return 0
+  [[ -n "$RELAY_SUB_URL" ]] || { merge_extra_nodes; return 0; }
   local raw="$RELAY_DIR/subscription.yaml.tmp" tmp="$NODES_FILE.tmp.$$" n=0
   if ! curl -fsS --max-time 30 "$RELAY_SUB_URL" -o "$raw" 2>/dev/null; then
     rm -f "$raw"
@@ -210,6 +244,13 @@ sync_nodes() {
     END { flush() }
   ' "$raw" >"$tmp" 2>/dev/null || { rm -f "$raw" "$tmp"; log "subscription parse failed"; return 1; }
   rm -f "$raw"
+  local extra="${RELAY_EXTRA_NODES_FILE:-/data/relay-extra-nodes.tsv}"
+  if [[ -s "$extra" ]]; then
+    awk -v nmax="${RELAY_NODE_MAX:-64}" '
+      FNR==NR { if (NF>=6) { k=$6; if (!(k in seen)) { seen[k]=1; print; cnt++ } } next }
+      NF>=6 { k=$6; if (!(k in seen) && cnt+0 < nmax+0) { seen[k]=1; print; cnt++ } }
+    ' "$tmp" "$extra" >"$tmp.merge" && mv -f "$tmp.merge" "$tmp"
+  fi
   [[ -s "$tmp" ]] && n=$(wc -l <"$tmp")
   if ((n < 1)); then
     rm -f "$tmp"
@@ -271,7 +312,7 @@ load_session_map() {
 }
 
 save_session_map() {
-  local i tmp="$SESSION_MAP_FILE.tmp.$$"
+  local i tmp="$SESSION_MAP_FILE.tmp.$$.$RANDOM"
   : >"$tmp"
   for ((i = 1; i <= RELAY_COUNT; i++)); do
     printf '%d\t%d\n' "$i" "$(session_node_index "$i")" >>"$tmp"
@@ -281,7 +322,12 @@ save_session_map() {
 }
 
 session_node_index() {
-  local i=$1 idx
+  local i=$1 idx nf
+  nf="$(sess_dir "$i")/node"
+  if [[ -f "$nf" ]]; then
+    idx=$(cat "$nf" 2>/dev/null)
+    if [[ "$idx" =~ ^[0-9]+$ ]]; then printf '%d' "$((10#$idx))"; return 0; fi
+  fi
   if ((NODE_COUNT > 0)); then
     idx=${SESSION_NODE[$i]:-}
     if [[ -z "$idx" ]] || ((idx < 1 || idx > NODE_COUNT)); then
@@ -347,16 +393,21 @@ status_set() {
     out+="${out:+$'\t'}$v"
   done
   [[ -n "$node" ]] || node=$(node_name_for_port "$port")
-  STATUS["$port"]="$out"$'\t'"$(date +%s)"$'\t'"${node:--}"
+  local entry="$out"$'\t'"$(date +%s)"$'\t'"${node:--}"
+  STATUS["$port"]="$entry"
+  mkdir -p "$STATE_DIR/status.d"
+  printf '%s\t%s\n' "$port" "$entry" >"$STATE_DIR/status.d/$port"
 }
 
 flush_status() {
-  local tmp="$STATE_DIR/status.tsv.tmp" port
+  local tmp="$STATE_DIR/status.tsv.tmp" f
   : >"$tmp"
-  if ((${#STATUS[@]})); then
-    while IFS= read -r port; do
-      printf '%s\t%s\n' "$port" "${STATUS[$port]}" >>"$tmp"
-    done < <(printf '%s\n' "${!STATUS[@]}" | sort -n)
+  if [[ -d "$STATE_DIR/status.d" ]]; then
+    for f in "$STATE_DIR"/status.d/*; do
+      [[ -f "$f" ]] || continue
+      cat "$f" >>"$tmp"
+    done
+    sort -t$'\t' -k1,1n "$tmp" -o "$tmp" 2>/dev/null || true
   fi
   mv "$tmp" "$STATUS_FILE"
 }
@@ -385,22 +436,128 @@ profile_valid() {
     grep -q '^Endpoint[[:space:]]*=' "$f"
 }
 
+register_cooling_left() {
+  local ts now
+  [[ -s "$REGISTER_COOLDOWN_FILE" ]] || { printf '0'; return 0; }
+  ts=$(cat "$REGISTER_COOLDOWN_FILE" 2>/dev/null)
+  [[ "$ts" =~ ^[0-9]+$ ]] || ts=0
+  now=$(date +%s)
+  if (( ts > now )); then printf '%s' $((ts - now)); else printf '0'; fi
+}
+
+register_cooling() {
+  local left
+  left=$(register_cooling_left)
+  (( left > 0 ))
+}
+
+register_cooldown_set() {
+  printf '%s
+' "$(( $(date +%s) + REGISTER_COOLDOWN ))" >"$REGISTER_COOLDOWN_FILE"
+}
+
+reg_sem_acquire() {
+  local k n=0
+  mkdir -p "$STATE_DIR/regsem"
+  while (( n < 150 )); do
+    find "$STATE_DIR/regsem" -maxdepth 1 -name 's*' -mmin +2 -exec rmdir {} + 2>/dev/null || true
+    for ((k = 1; k <= RELAY_REGISTER_JOBS; k++)); do
+      if mkdir "$STATE_DIR/regsem/s$k" 2>/dev/null; then printf '%s
+' "$k"; return 0; fi
+    done
+    sleep 0.2
+    n=$((n + 1))
+  done
+  return 1
+}
+
+reg_sem_release() { rmdir "$STATE_DIR/regsem/s$1" 2>/dev/null || true; }
+
+# ---- account freeze + proxied registration --------------------------------
+now_cs() {
+  local e=${EPOCHREALTIME:-0} s f
+  s=${e%%.*}
+  f=${e#*.}00
+  printf '%s\n' "$(( 10#$s * 100 + 10#${f:0:2} ))"
+}
+
+to_cs() {
+  local v=$1 a f=000
+  a=${v%%.*}
+  [[ "$v" == *.* ]] && f=${v#*.}00
+  printf '%s' "$(( 10#$a * 100 + 10#${f:0:2} ))"
+}
+
+pause_cs() {
+  local n=$1
+  (( n > 0 )) || return 0
+  sleep "$(( n / 100 )).$(printf '%02d' $(( n % 100 )))"
+}
+
+register_proxy_list() {
+  local p
+  for p in ${REGISTER_SOCKS_PORTS:-}; do
+    [[ "$p" =~ ^[0-9]+$ ]] || continue
+    printf '%s\n' "$p"
+  done
+  awk -F'\t' '($6=="ok") && $1 ~ /^[0-9]+$/ {print $1}' "$STATUS_FILE" 2>/dev/null || true
+}
+
+register_via_proxy() {
+  local dir=$1 port=$2 tmp rc=1
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/wgcf-reg-XXXXXX") || return 1
+  if (cd "$tmp" && env -u ALL_PROXY -u HTTP_PROXY \
+      HTTPS_PROXY="socks5h://${REGISTER_SOCKS_USER:-$SOCKS_USER}:${REGISTER_SOCKS_PASS:-$SOCKS_PASS}@127.0.0.1:${port}" \
+      timeout "$REGISTER_TIMEOUT" wgcf register --accept-tos --config wgcf-account.toml >register.log 2>&1) &&
+     [[ -s "$tmp/wgcf-account.toml" ]] &&
+     (cd "$tmp" && timeout "$GENERATE_TIMEOUT" wgcf generate --config wgcf-account.toml \
+      --profile wgcf-profile.conf --keepalive "$WGCF_KEEPALIVE" >>register.log 2>&1) &&
+     [[ -s "$tmp/wgcf-profile.conf" ]]; then
+    mkdir -p "$dir"
+    mv -f "$tmp/wgcf-account.toml" "$tmp/wgcf-profile.conf" "$dir/"
+    rc=0
+  fi
+  rm -rf "$tmp"
+  return $rc
+}
+
 register_session() {
   local i=$1 dir
   dir=$(sess_dir "$i")
   mkdir -p "$dir"
   chmod 700 "$dir" 2>/dev/null || true
-  local attempt=0
-  while ((attempt < REGISTER_RETRIES)); do
-    attempt=$((attempt + 1))
-    rm -f "$dir/wgcf-account.toml" "$dir/wgcf-profile.conf"
-    log "session $(printf 'n%02d' "$i") register attempt ${attempt}/${REGISTER_RETRIES}"
-    if (cd "$dir" && wgcf register --accept-tos --config wgcf-account.toml >>register.log 2>&1) &&
-      account_valid "$dir"; then
+  if account_valid "$dir" && profile_valid "$dir"; then
+    return 0
+  fi
+  if register_cooling; then
+    log "session $(printf 'n%02d' "$i") register cooling ${REGISTER_COOLDOWN}s; skip"
+    return 1
+  fi
+  local -a ports=()
+  mapfile -t ports < <(register_proxy_list)
+  ((${#ports[@]})) || ports=("")
+  local n=${#ports[@]} attempt idx port sem rc
+  for attempt in 1 2 3 4 5 6; do
+    idx=$(( (i + attempt - 2) % n ))
+    port=${ports[$idx]}
+    sem=$(reg_sem_acquire) || sem=0
+    log "session $(printf 'n%02d' "$i") register attempt $attempt via socks ${port:-direct}"
+    if [[ -n "$port" ]]; then
+      register_via_proxy "$dir" "$port"
+      rc=$?
+    else
+      (cd "$dir" && timeout "$REGISTER_TIMEOUT" wgcf register --accept-tos --config wgcf-account.toml >>register.log 2>&1)
+      rc=$?
+    fi
+    (( sem )) && reg_sem_release "$sem"
+    if (( rc == 0 )) && account_valid "$dir" && profile_valid "$dir"; then
+      log "session $(printf 'n%02d' "$i") account frozen (exit socks ${port:-direct})"
       return 0
     fi
-    sleep 5
+    sleep 1
   done
+  register_cooldown_set
+  log "session $(printf 'n%02d' "$i") register failed after retries; cooling ${REGISTER_COOLDOWN}s"
   return 1
 }
 
@@ -409,7 +566,7 @@ generate_profile() {
   dir=$(sess_dir "$i")
   local attempt
   for attempt in 1 2 3; do
-    if (cd "$dir" && wgcf generate --config wgcf-account.toml \
+    if (cd "$dir" && timeout "$GENERATE_TIMEOUT" wgcf generate --config wgcf-account.toml \
       --profile wgcf-profile.conf --keepalive "$WGCF_KEEPALIVE" \
       >>generate.log 2>&1) && profile_valid "$dir"; then
       return 0
@@ -444,7 +601,13 @@ render_config() {
   peerhost="$WG_ENDPOINT_HOST"
   peerport="$WG_ENDPOINT_PORT"
   if [[ -n "$RELAY_WG_ENDPOINTS" ]]; then
-    peer_ep=$(printf '%s\n' $RELAY_WG_ENDPOINTS | awk 'BEGIN{srand();}{a[NR]=$0}END{if(NR)print a[int(rand()*NR)+1]}')
+    local ep_i ep_n
+    ep_i=$(cat "$dir/endpoint.index" 2>/dev/null || printf '%d' "$(( i - 1 ))" )
+    [[ "$ep_i" =~ ^[0-9]+$ ]] || ep_i=$(( i - 1 ))
+    ep_n=$(printf '%s\n' $RELAY_WG_ENDPOINTS | wc -l)
+    (( ep_n > 0 )) || ep_n=1
+    ep_i=$(( ep_i % ep_n + 1 ))
+    peer_ep=$(printf '%s\n' $RELAY_WG_ENDPOINTS | sed -n "${ep_i}p")
     peerhost=${peer_ep%:*}
     peerport=${peer_ep##*:}
   fi
@@ -525,7 +688,7 @@ render_config() {
   fi
   mv "$cfg.tmp" "$cfg"
   chmod 600 "$cfg" 2>/dev/null || true
-  sing-box check -c "$cfg" >/dev/null 2>"$dir/check.log" || return 1
+  timeout 10 sing-box check -c "$cfg" >/dev/null 2>"$dir/check.log" || return 1
   return 0
 }
 
@@ -559,8 +722,57 @@ wait_port() {
   return 1
 }
 
+start_gate_wait() {
+  local node=$1 f="$STATE_DIR/startgate" nf gap ngap last cs need
+  mkdir -p "$f"
+  gap=$(to_cs "${RELAY_START_SPACING:-1.5}")
+  ngap=$(to_cs "${RELAY_START_NODE_GAP:-2}")
+  nf="$f/node-$node"
+  last=$(cat "$nf" 2>/dev/null || printf '0')
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  cs=$(now_cs)
+  need=$(( last + ngap - cs ))
+  pause_cs "$need"
+  printf '%s\n' "$(now_cs)" >"$nf"
+  local lt=0
+  while ! mkdir "$f/pace.mk" 2>/dev/null; do
+    sleep 0.1
+    lt=$((lt + 1))
+    (( lt > 300 )) && break
+  done
+  last=$(cat "$f/pace.ts" 2>/dev/null || printf '0')
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  cs=$(now_cs)
+  need=$(( last + gap - cs ))
+  pause_cs "$need"
+  printf '%s\n' "$(now_cs)" >"$f/pace.ts"
+  rmdir "$f/pace.mk" 2>/dev/null || true
+}
+
+start_gate_acquire() {
+  local k conc=${RELAY_START_CONCURRENCY:-4} waited=0
+  mkdir -p "$STATE_DIR/startgate"
+  while :; do
+    for ((k = 1; k <= conc; k++)); do
+      if mkdir "$STATE_DIR/startgate/t$k" 2>/dev/null; then
+        printf '%s' "$k"
+        return 0
+      fi
+    done
+    sleep 0.2
+    waited=$((waited + 1))
+    if (( waited >= 80 )); then
+      printf 'skip'
+      return 0
+    fi
+  done
+}
+
 start_session() {
-  local i=$1 dir=$2 port=$3
+  local i=$1 dir=$2 port=$3 token node
+  node=$(session_node_index "$i" 2>/dev/null || printf '0')
+  start_gate_wait "$node"
+  token=$(start_gate_acquire)
   stop_session "$i"
   (
     cd "$dir" || exit 1
@@ -569,12 +781,14 @@ start_session() {
   local pid=$!
   printf '%s\n' "$pid" >"$dir/sing-box.pid"
   if wait_port "$port" 15; then
+    [[ "$token" == "skip" ]] || rmdir "$STATE_DIR/startgate/t$token" 2>/dev/null || true
     return 0
   fi
   log "session $(printf 'n%02d' "$i") port $port did not listen; log tail:"
   tail -n 5 "$dir/sing-box.log" >&2 || true
   kill "$pid" 2>/dev/null || true
   rm -f "$dir/sing-box.pid"
+  [[ "$token" == "skip" ]] || rmdir "$STATE_DIR/startgate/t$token" 2>/dev/null || true
   return 1
 }
 
@@ -599,27 +813,176 @@ prefix_usable() {
   return 0
 }
 
-rebind_session() {
-  local i=$1 cur new j now
+# ---- failure backoff + node scoring ---------------------------------------
+
+slot_backoff_file() {
+  printf '%s/backoff/%s' "$STATE_DIR" "$(printf 'n%02d' "$1")"
+}
+
+slot_fails_get() {
+  cat "$(slot_backoff_file "$1")" 2>/dev/null || true
+}
+
+slot_backoff_ok() {
+  rm -f "$(slot_backoff_file "$1")" 2>/dev/null || true
+}
+
+slot_backoff_fail() {
+  local i=$1 f rec fails next delay
+  f=$(slot_backoff_file "$i")
+  mkdir -p "$STATE_DIR/backoff"
+  rec=$(cat "$f" 2>/dev/null || true)
+  fails=${rec%%$'\t'*}
+  [[ "$fails" =~ ^[0-9]+$ ]] || fails=0
+  fails=$((fails + 1))
+  if (( fails > 6 )); then delay=$RELAY_BACKOFF_MAX; else delay=$((RELAY_BACKOFF_BASE * (1 << (fails - 1)))); fi
+  (( delay > RELAY_BACKOFF_MAX )) && delay=$RELAY_BACKOFF_MAX
+  next=$(($(date +%s) + delay))
+  printf '%s\t%s\n' "$fails" "$next" >"$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+  log "backoff n$(printf '%02d' "$i") fails=$fails retry in ${delay}s"
+}
+
+slot_in_backoff() {
+  local rec next
+  rec=$(slot_fails_get "$1")
+  [[ -n "$rec" ]] || return 1
+  next=${rec##*$'\t'}
+  [[ "$next" =~ ^[0-9]+$ ]] || return 1
+  (( next > $(date +%s) ))
+}
+
+node_event() {
+  local node=$1 kind=$2
+  [[ "$kind" == "ok" || "$kind" == "fail" ]] || return 0
+  printf '%s\t%s\t%s\n' "$(date +%s)" "$node" "$kind" >>"$NODE_EVENTS_FILE"
+}
+
+node_score() {
+  local node=$1
+  [[ -s "$NODE_EVENTS_FILE" ]] || { printf '0\t0\t0\n'; return 0; }
+  awk -F'\t' -v n="$node" '
+    $2 == n {
+      if ($3 == "ok") { ok++; streak = 0 } else { fail++; streak++; last_fail = $1 }
+    }
+    END { printf "%d\t%d\t%d\n", ok * 2 - fail, last_fail + 0, streak }
+  ' "$NODE_EVENTS_FILE" 2>/dev/null || printf '0\t0\t0\n'
+}
+
+node_quarantined() {
+  local node=$1 score last_fail streak now
+  read -r score last_fail streak <<<"$(node_score "$node")"
+  now=$(date +%s)
+  (( streak >= NODE_BAD_STREAK && last_fail > 0 && now - last_fail < NODE_QUARANTINE_SECONDS ))
+}
+
+node_choose() {
+  local cur=$1 now j new best=0 bestscore=-2147483648 score _x _y i used=" " cap="${RELAY_MAX_PER_NODE:-8}" n_i
+  now=$(date +%s)
+  declare -A nuse=()
+  for ((i = 1; i <= RELAY_COUNT; i++)); do
+    (( i == cur )) && continue
+    n_i=$(session_node_index "$i")
+    [[ "$n_i" =~ ^[0-9]+$ ]] || n_i=${SESSION_NODE[i]:-0}
+    used+="$n_i: "
+    (( n_i > 0 )) && nuse[$n_i]=$(( ${nuse[$n_i]:-0} + 1 ))
+  done
+  for ((j = 1; j <= NODE_COUNT; j++)); do
+    new=$(( (cur - 1 + j) % NODE_COUNT + 1 ))
+    (( new == cur )) && continue
+    (( ${NODE_COOL[$new]:-0} > now )) && continue
+    node_quarantined "$new" && continue
+    [[ "$used" == *" $new: "* ]] && continue
+    (( ${nuse[$new]:-0} >= cap )) && continue
+    read -r score _x _y <<<"$(node_score "$new")"
+    [[ "$score" =~ ^-?[0-9]+$ ]] || score=0
+    if (( score > bestscore )); then bestscore=$score; best=$new; fi
+  done
+  if (( best == 0 )); then
+    for ((j = 1; j <= NODE_COUNT; j++)); do
+      new=$(( (cur - 1 + j) % NODE_COUNT + 1 ))
+      (( new == cur )) && continue
+      (( ${nuse[$new]:-0} >= cap )) && continue
+      read -r score _x _y <<<"$(node_score "$new")"
+      [[ "$score" =~ ^-?[0-9]+$ ]] || score=0
+      if (( score > bestscore )); then bestscore=$score; best=$new; fi
+    done
+  fi
+  if (( best == 0 )); then
+    for ((j = 1; j <= NODE_COUNT; j++)); do
+      new=$(( (cur - 1 + j) % NODE_COUNT + 1 ))
+      (( new == cur )) && continue
+      read -r score _x _y <<<"$(node_score "$new")"
+      [[ "$score" =~ ^-?[0-9]+$ ]] || score=0
+      if (( score > bestscore )); then bestscore=$score; best=$new; fi
+    done
+  fi
+  (( best > 0 )) || best=$(( cur % NODE_COUNT + 1 ))
+  printf '%s\n' "$best"
+}
+
+_node_move_lock() {
+  local lk="$STATE_DIR/rebind.lock" k=0
+  while ! mkdir "$lk" 2>/dev/null; do
+    k=$((k + 1))
+    if (( k > 50 )); then rmdir "$lk" 2>/dev/null; mkdir "$lk" 2>/dev/null; break; fi
+    sleep 0.1
+  done
+}
+
+_node_move_drop() { rmdir "$STATE_DIR/rebind.lock" 2>/dev/null || true; }
+
+_node_spread_precool() {
+  local j u c now
+  now=$(date +%s)
+  local -A use=()
+  for ((j = 1; j <= RELAY_COUNT; j++)); do
+    u=$(session_node_index "$j")
+    (( u >= 1 && u <= NODE_COUNT )) || continue
+    use[$u]=$(( ${use[$u]:-0} + 1 ))
+  done
+  for u in "${!use[@]}"; do
+    c=$(printf '%s' "${use[$u]:-0}")
+    [[ "$c" =~ ^[0-9]+$ ]] || continue
+    (( c >= 2 )) || continue
+    (( ${NODE_COOL[$u]:-0} > now + 2 )) && continue
+    NODE_COOL[$u]=$(( now + 1 ))
+  done
+}
+
+rebind_node_only() {
+  local i=$1 cur new now
   ((NODE_COUNT > 1)) || return 1
+  _node_move_lock
   cur=$(session_node_index "$i")
   now=$(date +%s)
   NODE_COOL[$cur]=$((now + NODE_COOLING_SECONDS))
-  for ((j = 1; j < NODE_COUNT; j++)); do
-    new=$(( (cur - 1 + j) % NODE_COUNT + 1 ))
-    (( new == cur )) && continue
-    if (( ${NODE_COOL[$new]:-0} <= now )); then
-      SESSION_NODE[$i]=$new
-      save_session_map
-      log "rebind n$(printf '%02d' "$i"): node $cur -> $new (cooldown $NODE_COOLING_SECONDS s)"
-      render_config "$i" "$(sess_dir "$i")" && restart_session "$i"
-      return 0
-    fi
-  done
-  new=$(( cur % NODE_COUNT + 1 ))
+  _node_spread_precool
+  new=$(node_choose "$cur")
+  (( new != cur )) || new=$(( cur % NODE_COUNT + 1 ))
   SESSION_NODE[$i]=$new
+  mkdir -p "$(sess_dir "$i")"
+  printf '%d\n' "$new" >"$(sess_dir "$i")/node"
   save_session_map
-  log "rebind n$(printf '%02d' "$i"): all nodes cooling, node $cur -> $new"
+  _node_move_drop
+  log "node move n$(printf '%02d' "$i"): node $cur -> $new (cooldown ${NODE_COOLING_SECONDS}s)"
+}
+
+rebind_session() {
+  local i=$1 cur new now
+  ((NODE_COUNT > 1)) || return 1
+  _node_move_lock
+  cur=$(session_node_index "$i")
+  now=$(date +%s)
+  NODE_COOL[$cur]=$((now + NODE_COOLING_SECONDS))
+  _node_spread_precool
+  new=$(node_choose "$cur")
+  (( new != cur )) || new=$(( cur % NODE_COUNT + 1 ))
+  SESSION_NODE[$i]=$new
+  mkdir -p "$(sess_dir "$i")"
+  printf '%d\n' "$new" >"$(sess_dir "$i")/node"
+  save_session_map
+  _node_move_drop
+  log "rebind n$(printf '%02d' "$i"): node $cur -> $new (score-based, old node cooling $NODE_COOLING_SECONDS s)"
   render_config "$i" "$(sess_dir "$i")" && restart_session "$i"
   return 0
 }
@@ -677,6 +1040,74 @@ valid_prefix() {
   return 0
 }
 
+badacct_file() { printf '%s/badacct/%s' "$STATE_DIR" "$(printf 'n%02d' "$1")"; }
+
+badacct_bump() {
+  local i=$1 f c
+  f=$(badacct_file "$i")
+  mkdir -p "$STATE_DIR/badacct" 2>/dev/null || true
+  c=$(cat "$f" 2>/dev/null || printf '0')
+  [[ "$c" =~ ^[0-9]+$ ]] || c=0
+  printf '%d
+' "$((c + 1))" >"$f"
+}
+
+badacct_reset() { rm -f "$(badacct_file "$1")"; }
+
+relay_ok_ratio_healthy() {
+  local f ok=0 n=0
+  for f in "$STATE_DIR/status.d"/*; do
+    [[ -f "$f" ]] || continue
+    n=$((n + 1))
+    if awk -F'\t' '$6 == "ok" { found = 1 } END { exit !found }' "$f" 2>/dev/null; then
+      ok=$((ok + 1))
+    fi
+  done
+  (( n > 0 && ok * 4 >= n * 3 ))
+}
+
+replace_account() {
+  local i=$1 dir bak
+  dir=$(sess_dir "$i")
+  if ! mkdir "$dir/acct.lock" 2>/dev/null; then
+    log "session $(printf 'n%02d' "$i") account replace busy; skip"
+    return 1
+  fi
+  bak="$dir/acct-replaced.$(date +%s)"
+  mkdir -p "$bak" || { rmdir "$dir/acct.lock" 2>/dev/null; return 1; }
+  mv "$dir/wgcf-account.toml" "$bak/" 2>/dev/null || true
+  mv "$dir/wgcf-profile.conf" "$bak/" 2>/dev/null || true
+  if register_session "$i" && generate_profile "$i"; then
+    rm -rf "$bak"
+    badacct_reset "$i"
+    rmdir "$dir/acct.lock" 2>/dev/null || true
+    log "session $(printf 'n%02d' "$i") account replaced; old account discarded"
+    return 0
+  fi
+  mv "$bak/wgcf-account.toml" "$dir/" 2>/dev/null || true
+  mv "$bak/wgcf-profile.conf" "$dir/" 2>/dev/null || true
+  rmdir "$bak" 2>/dev/null || true
+  rmdir "$dir/acct.lock" 2>/dev/null || true
+  log "session $(printf 'n%02d' "$i") account replace failed; old account restored"
+  return 1
+}
+
+maybe_replace_account() {
+  local i=$1 f c now last
+  f=$(badacct_file "$i")
+  c=$(cat "$f" 2>/dev/null || printf '0')
+  [[ "$c" =~ ^[0-9]+$ ]] || c=0
+  (( c >= RELAY_ACCT_REREG_AFTER )) || return 1
+  now=$(date +%s)
+  last=$(cat "$f.replaced" 2>/dev/null || printf '0')
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  (( now - last >= RELAY_ACCT_REREG_COOLDOWN )) || return 1
+  relay_ok_ratio_healthy || { log "session $(printf 'n%02d' "$i") account replace skipped (mass failure in progress)"; return 1; }
+  printf '%d
+' "$now" >"$f.replaced"
+  replace_account "$i"
+}
+
 bring_up() {
   local i=$1 dir port res prefix ip loc pid
   dir=$(sess_dir "$i")
@@ -691,22 +1122,26 @@ bring_up() {
   if ! account_valid "$dir"; then
     if ! register_session "$i"; then
       status_set "$port" 0 "$(session_endpoint "$i")" "" "" "register-failed"
+      slot_backoff_fail "$i"
       return 1
     fi
   fi
   if ! profile_valid "$dir"; then
     if ! generate_profile "$i"; then
       status_set "$port" 0 "$(session_endpoint "$i")" "" "" "generate-failed"
+      slot_backoff_fail "$i"
       return 1
     fi
   fi
   if ! render_config "$i" "$dir"; then
     log "session $(printf 'n%02d' "$i") config render/check failed"
     status_set "$port" 0 "$(session_endpoint "$i")" "" "" "config-failed"
+    slot_backoff_fail "$i"
     return 1
   fi
   if ! start_session "$i" "$dir" "$port"; then
     status_set "$port" 0 "$(session_endpoint "$i")" "" "" "listen-failed"
+    slot_backoff_fail "$i"
     return 1
   fi
   pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
@@ -720,19 +1155,60 @@ bring_up() {
   fi
   if [[ -n "$prefix" ]] && prefix_usable "$prefix"; then
     status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "ok"
+    slot_backoff_ok "$i"
+    node_event "$(session_node_index "$i")" ok
+    badacct_reset "$i"
     log "up $(printf 'n%02d' "$i") port=$port prefix=$prefix"
     return 0
+  fi
+  if [[ -z "$prefix" ]]; then
+    badacct_bump "$i"
+    slot_backoff_fail "$i"
+    node_event "$(session_node_index "$i")" fail
   fi
   status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "bad-prefix"
   log "up $(printf 'n%02d' "$i") port=$port prefix='${prefix:-none}' (invalid or duplicate; dedup will reroll)"
   return 0
 }
 
-recover_session() {
-  local i=$1 dir
+endpoint_rotate() {
+  local i=$1 dir idx
   dir=$(sess_dir "$i")
+  idx=$(cat "$dir/endpoint.index" 2>/dev/null || printf '0')
+  [[ "$idx" =~ ^[0-9]+$ ]] || idx=0
+  printf '%s\n' "$((idx + 1))" >"$dir/endpoint.index"
+  render_config "$i" "$dir"
+}
+
+rotate_session() {
+  local i=$1 port res
+  port=$(sing_port "$i")
+  log "rotate n$(printf '%02d' "$i"): endpoint cycle (account kept)"
+  if endpoint_rotate "$i"; then
+    if start_session "$i" "$(sess_dir "$i")" "$port"; then
+      res=$(probe "$port" 2>/dev/null || true)
+      if [[ -n "$res" ]]; then
+        slot_backoff_ok "$i"
+        node_event "$(session_node_index "$i")" ok
+        return 0
+      fi
+    fi
+  fi
+  log "rotate n$(printf '%02d' "$i") failed; rebinding node"
+  rebind_session "$i" || true
+}
+
+recover_session() {
+  local i=$1 mode=${2:-soft} dir res
+  dir=$(sess_dir "$i")
+  if [[ "$mode" != "force" && -f "$dir/wgcf-profile.conf" ]]; then
+    if restart_session "$i"; then
+      res=$(probe "$(sing_port "$i")" 2>/dev/null || true)
+      [[ -n "$res" ]] && return 0
+    fi
+    log "soft recover n$(printf 'n%02d' "$i") restart failed; account kept, rotation expected"
+  fi
   stop_session "$i"
-  rm -f "$dir/wgcf-account.toml" "$dir/wgcf-profile.conf"
   bring_up "$i"
 }
 
@@ -748,66 +1224,84 @@ restart_session() {
   fi
 }
 
+
 dedup_pass() {
-  local -A seen=()
-  local i port dir res prefix ip loc pid tries ok=0
-  for ((i = 1; i <= RELAY_COUNT; i++)); do
-    port=$(sing_port "$i")
-    dir=$(sess_dir "$i")
-    tries=0
-    while :; do
-      res=""
-      res=$(probe "$port" 2>/dev/null || true)
+  local workdir="$STATE_DIR/dedup-work"
+  local max_rounds="${DEDUP_RETRIES:-4}"
+  [[ "$max_rounds" =~ ^[0-9]+$ ]] || max_rounds=4
+  local round i port res prefix ip loc pid ok
+  local -a idx=() reroll=()
+  for ((i = 1; i <= RELAY_COUNT; i++)); do idx+=("$i"); done
+  for ((round = 0; round <= max_rounds; round++)); do
+    rm -rf "$workdir"
+    mkdir -p "$workdir"
+    WORKER_FN=_worker_probe
+    _pool_run "$workdir" "${idx[@]}"
+    local -A seen=()
+    reroll=()
+    ok=0
+    for i in "${idx[@]}"; do
+      [[ -f "$workdir/probe.$i" ]] || continue
+      IFS=$'\t' read -r _ port res <"$workdir/probe.$i"
       prefix=""
       ip=""
       loc=""
       if [[ -n "$res" ]]; then
         IFS=$'\t' read -r prefix ip loc <<<"$res" || true
       fi
-      pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
+      pid=$(cat "$(sess_dir "$i")/sing-box.pid" 2>/dev/null || printf '0')
       if [[ -n "$prefix" ]] && prefix_usable "$prefix" && [[ -z "${seen[$prefix]:-}" ]]; then
         seen["$prefix"]="$port"
         ok=$((ok + 1))
         status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "ok"
-        break
+        continue
       fi
       if [[ -z "$prefix" ]]; then
-        if ((tries == 0)); then
-          tries=1
-          log "dedup $(printf 'n%02d' "$i") port=$port probe failed; retrying once"
-          sleep 2
-          continue
-        fi
         status_set "$port" "$pid" "$(session_endpoint "$i")" "" "" "probe-failed"
-        break
+        reroll+=("$i")
+        continue
       fi
-      if ((tries >= DEDUP_RETRIES)); then
-        log "WARN $(printf 'n%02d' "$i") port=$port prefix='${prefix:-none}' still invalid or duplicate after ${DEDUP_RETRIES} rerolls"
-        status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "bad"
-        break
-      fi
-      tries=$((tries + 1))
-      log "dedup $(printf 'n%02d' "$i") port=$port prefix='${prefix:-none}' try=$tries"
-      recover_session "$i" || true
+      status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "bad"
+      reroll+=("$i")
     done
+    flush_status
+    log "dedup round $round: unique /64 ${ok}/${RELAY_COUNT}, reroll=${#reroll[@]}"
+    (( ${#reroll[@]} == 0 )) && break
+    WORKER_FN=_worker_reroll
+    _pool_run "$workdir" "${reroll[@]}"
+    _pool_collect "$workdir"
+    flush_status
+    if register_cooling; then
+      log "dedup paused: register cooling $(register_cooling_left)s"
+      break
+    fi
   done
-  flush_status
-  log "relay unique /64: ${ok}/${RELAY_COUNT}"
+  (( ${#reroll[@]} == 0 )) || log "WARN dedup: ${#reroll[@]} session(s) still duplicate or down"
 }
 
+
 health_pass() {
-  local i port dir res prefix ip loc pid state changed=0
+  local workdir="$STATE_DIR/health-work"
+  local i port res prefix ip loc pid state changed=0 ok=0
+  local -a idx=() ops=()
+  for ((i = 1; i <= RELAY_COUNT; i++)); do idx+=("$i"); done
+  rm -rf "$workdir"
+  mkdir -p "$workdir"
+  WORKER_FN=_worker_probe
+  _pool_run "$workdir" "${idx[@]}"
   local -A seen=()
-  for ((i = 1; i <= RELAY_COUNT; i++)); do
+  for i in "${idx[@]}"; do
     port=$(sing_port "$i")
-    dir=$(sess_dir "$i")
     res=""
-    res=$(probe "$port" 2>/dev/null || true)
-    prefix=""; ip=""; loc=""
+    [[ -f "$workdir/probe.$i" ]] && IFS=$'\t' read -r _ port res <"$workdir/probe.$i"
+    prefix=""
+    ip=""
+    loc=""
     if [[ -n "$res" ]]; then IFS=$'\t' read -r prefix ip loc <<<"$res" || true; fi
-    pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
+    pid=$(cat "$(sess_dir "$i")/sing-box.pid" 2>/dev/null || printf '0')
     if [[ -n "$prefix" ]] && prefix_usable "$prefix" && [[ -z "${seen[$prefix]:-}" ]]; then
       seen["$prefix"]="$port"
+      ok=$((ok + 1))
       state=$(printf '%s' "${STATUS[$port]:-}" | cut -f5)
       [[ "$state" == "ok" ]] || changed=1
       status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "ok"
@@ -816,48 +1310,48 @@ health_pass() {
     fi
     changed=1
     if [[ -z "$prefix" ]]; then
-      log "health: port $port probe failed; restarting sing-box"
-      restart_session "$i" || true
-      res=$(probe "$port" 2>/dev/null || true); prefix=""; ip=""; loc=""
-      if [[ -n "$res" ]]; then IFS=$'\t' read -r prefix ip loc <<<"$res" || true; fi
-      if [[ -z "$prefix" ]]; then
-        NODE_FAILS[$i]=$(( ${NODE_FAILS[$i]:-0} + 1 ))
-        log "health: port $port still down (fail ${NODE_FAILS[$i]}/2)"
-        if (( ${NODE_FAILS[$i]} >= 2 )); then
-          rebind_session "$i" || true
-          NODE_FAILS[$i]=0
-          res=$(probe "$port" 2>/dev/null || true); prefix=""; ip=""; loc=""
-          if [[ -n "$res" ]]; then IFS=$'\t' read -r prefix ip loc <<<"$res" || true; fi
-        fi
-      else
+      NODE_FAILS[$i]=$(( ${NODE_FAILS[$i]:-0} + 1 ))
+      if (( ${NODE_FAILS[$i]} >= 2 )); then
         NODE_FAILS[$i]=0
+        ops+=("rebind:$i")
+      else
+        ops+=("restart:$i")
       fi
+    elif burned_active "$prefix" || [[ -n "${seen[$prefix]:-}" ]]; then
+      ops+=("recover:$i")
+    elif ! valid_prefix "$prefix"; then
+      ops+=("restart:$i")
+    else
+      ops+=("recover:$i")
     fi
-    if [[ -n "$prefix" ]] && burned_active "$prefix"; then
-      log "health: port $port prefix $prefix burned; rerolling account"
-      recover_session "$i" || true
-      res=$(probe "$port" 2>/dev/null || true); prefix=""; ip=""; loc=""
-      if [[ -n "$res" ]]; then IFS=$'\t' read -r prefix ip loc <<<"$res" || true; fi
-    elif [[ -n "$prefix" ]] && valid_prefix "$prefix" && [[ -n "${seen[$prefix]:-}" ]]; then
-      log "health: port $port duplicate /64 $prefix; rerolling account"
-      recover_session "$i" || true
-      res=$(probe "$port" 2>/dev/null || true); prefix=""; ip=""; loc=""
-      if [[ -n "$res" ]]; then IFS=$'\t' read -r prefix ip loc <<<"$res" || true; fi
-    elif [[ -n "$prefix" ]] && ! valid_prefix "$prefix"; then
-      log "health: port $port bad prefix $prefix; restarting sing-box"
-      restart_session "$i" || true
-      res=$(probe "$port" 2>/dev/null || true); prefix=""; ip=""; loc=""
-      if [[ -n "$res" ]]; then IFS=$'\t' read -r prefix ip loc <<<"$res" || true; fi
-    fi
-    pid=$(cat "$dir/sing-box.pid" 2>/dev/null || printf '0')
-    state="bad"
-    if [[ -n "$prefix" ]] && prefix_usable "$prefix" && [[ -z "${seen[$prefix]:-}" ]]; then
-      seen["$prefix"]="$port"; state="ok"
-    elif [[ -z "$prefix" ]]; then
-      state="probe-failed"
-    fi
-    status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "$state"
+    status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "bad"
   done
+  if (( ${#ops[@]} )); then
+    WORKER_FN=_worker_health_fix
+    local -a specs=("${ops[@]}")
+    _pool_run "$workdir" "${specs[@]}"
+    local o
+    for o in "${specs[@]}"; do
+      i=${o#*:}
+      i=$((10#$i))
+      port=$(sing_port "$i")
+      res=""
+      [[ -f "$workdir/probe.$i" ]] && IFS=$'\t' read -r _ port res <"$workdir/probe.$i"
+      prefix=""
+      ip=""
+      loc=""
+      if [[ -n "$res" ]]; then IFS=$'\t' read -r prefix ip loc <<<"$res" || true; fi
+      pid=$(cat "$(sess_dir "$i")/sing-box.pid" 2>/dev/null || printf '0')
+      state="bad"
+      if [[ -n "$prefix" ]] && prefix_usable "$prefix" && [[ -z "${seen[$prefix]:-}" ]]; then
+        seen["$prefix"]="$port"
+        state="ok"
+      elif [[ -z "$prefix" ]]; then
+        state="probe-failed"
+      fi
+      status_set "$port" "$pid" "$(session_endpoint "$i")" "$prefix" "$loc" "$state"
+    done
+  fi
   flush_status
   ((changed)) && log "health: relay pool changed"
 }
@@ -922,14 +1416,113 @@ cleanup() {
   done
 }
 
-start_all_sessions() {
-  local i
-  for ((i = 1; i <= RELAY_COUNT; i++)); do
-    bring_up "$i" || log "WARN session $(printf 'n%02d' "$i") failed to come up"
-    if ((i < RELAY_COUNT)); then
-      sleep "$RELAY_START_STAGGER"
-    fi
+
+# ---- bounded parallel executor -----------------------------------------
+# Session passes run one worker per slot, RELAY_START_JOBS at a time. Workers
+# touch only per-session files; the parent merges their status lines so
+# STATUS/status.tsv keeps a single writer.
+_pool_run() {
+  local workdir=$1
+  shift
+  local -a pids=()
+  local idx
+  for idx in "$@"; do
+    ( "$WORKER_FN" "$idx" "$workdir" ) &
+    pids+=("$!")
+    while (( ${#pids[@]} >= RELAY_START_JOBS )); do
+      wait "${pids[0]}" 2>/dev/null || true
+      pids=("${pids[@]:1}")
+    done
   done
+  for idx in "${pids[@]}"; do
+    wait "$idx" 2>/dev/null || true
+  done
+}
+
+_worker_status_shadow() {
+  local workdir=$1
+  status_set() {
+    local p=$1
+    shift
+    local -a f=("$@")
+    local out="" n v node="${f[5]:-}"
+    for ((n = 0; n < 5; n++)); do
+      v="${f[$n]:-}"
+      [[ -n "$v" ]] || v="-"
+      out+="${out:+$'\t'}$v"
+    done
+    [[ -n "$node" ]] || node=$(node_name_for_port "$p")
+    mkdir -p "$STATE_DIR/status.d"
+    printf '%s\t%s\t%s\t%s\n' "$p" "$out" "$(date +%s)" "${node:--}" >"$STATE_DIR/status.d/$p"
+  }
+}
+
+_pool_collect() {
+  local workdir=$1 f line port
+  for f in "$workdir"/status.*; do
+    [[ -e "$f" ]] || continue
+    line=$(cat "$f")
+    port=${line%%$'\t'*}
+    [[ "$port" =~ ^[0-9]+$ ]] && STATUS["$port"]="${line#*$'\t'}"
+    rm -f "$f"
+  done
+}
+
+_worker_bring_up() {
+  local i=$1 workdir=$2
+  _worker_status_shadow "$workdir"
+  bring_up "$i" || log "WARN session $(printf 'n%02d' "$i") failed to come up"
+}
+
+_worker_probe() {
+  local i=$1 workdir=$2 port res
+  port=$(sing_port "$i")
+  res=$(probe "$port" 2>/dev/null || true)
+  printf '%s\t%s\t%s\n' "$i" "$port" "$res" >"$workdir/probe.$i"
+}
+
+_worker_reroll() {
+  local i=$1 workdir=$2 fails
+  _worker_status_shadow "$workdir"
+  fails=$(slot_fails_get "$i" 2>/dev/null | cut -f1)
+  [[ "$fails" =~ ^[0-9]+$ ]] || fails=0
+  if (( fails >= 2 )) && (( NODE_COUNT > 1 )); then
+    log "dedup reroll n$(printf '%02d' "$i") fails=$fails; rebind node (account kept)"
+    rebind_session "$i" || true
+    return 0
+  fi
+  log "dedup reroll n$(printf '%02d' "$i") fails=$fails; rotating endpoint (account kept)"
+  rotate_session "$i" || true
+}
+
+_worker_health_fix() {
+  local spec=$1 workdir=$2 i port res
+  i=${spec#*:}
+  i=$((10#$i))
+  port=$(sing_port "$i")
+  case "${spec%%:*}" in
+    restart) restart_session "$i" || true ;;
+    rebind) rebind_session "$i" || true ;;
+    recover) rotate_session "$i" || true ;;
+  esac
+  res=$(probe "$port" 2>/dev/null || true)
+  printf '%s\t%s\t%s\n' "$i" "$port" "$res" >"$workdir/probe.$i"
+}
+
+
+start_all_sessions() {
+  local i workdir="$STATE_DIR/boot-work"
+  local -a idx=()
+  for ((i = 1; i <= RELAY_COUNT; i++)); do idx+=("$i"); done
+  rm -rf "$STATE_DIR/backoff"
+  rm -rf "$workdir"
+  mkdir -p "$workdir"
+  WORKER_FN=_worker_bring_up
+  _pool_run "$workdir" "${idx[@]}"
+  _pool_collect "$workdir"
+  rm -rf "$workdir"
+  flush_status
+  log "boot: ${RELAY_COUNT} session(s) brought up"
   dedup_pass
 }
 
@@ -946,7 +1539,7 @@ mark_all() {
 validate_env() {
   [[ "$RELAY_COUNT" =~ ^[0-9]+$ ]] || die "RELAY_COUNT must be numeric"
   RELAY_COUNT=$((10#$RELAY_COUNT))
-  ((RELAY_COUNT >= 1 && RELAY_COUNT <= 128)) || die "RELAY_COUNT must be 1-128"
+  ((RELAY_COUNT >= 1 && RELAY_COUNT <= 4096)) || die "RELAY_COUNT must be 1-128"
   [[ "$SING_PORT_BASE" =~ ^[0-9]+$ ]] || die "SING_PORT_BASE must be numeric"
   SING_PORT_BASE=$((10#$SING_PORT_BASE))
   ((SING_PORT_BASE + RELAY_COUNT - 1 <= 65535)) || die "session port range overflows"
@@ -962,9 +1555,17 @@ validate_env() {
 main() {
   mkdir -p "$SESSION_ROOT"
   chmod 700 "$RELAY_DIR" 2>/dev/null || true
+  local _lf
+  for _lf in relay.log watchdog.log; do
+    if [[ -f "$STATE_DIR/$_lf" ]] && (( $(stat -c %s "$STATE_DIR/$_lf" 2>/dev/null || echo 0) > 8388608 )); then
+      mv -f "$STATE_DIR/$_lf" "$STATE_DIR/$_lf.1" 2>/dev/null || true
+      : >"$STATE_DIR/$_lf"
+    fi
+  done
   : >"$STATE_DIR/relay-mode"
 
   load_secrets
+  merge_extra_nodes || true
   reload_settings
   if [[ -n "$RELAY_SUB_URL" ]]; then
     sync_nodes || true

@@ -71,8 +71,18 @@ services:
       RELAY_SYNC_INTERVAL: "${RELAY_SUB_SYNC_INTERVAL:-1800}"
       RELAY_PROBE_URL: "${RELAY_PROBE_URL:-https://[2606:4700:4700::1111]/cdn-cgi/trace}"
       RELAY_START_STAGGER: "${RELAY_START_STAGGER:-2.5}"
+      RELAY_START_JOBS: "${RELAY_START_JOBS:-16}"
+      RELAY_REGISTER_JOBS: "${RELAY_REGISTER_JOBS:-3}"
+      RELAY_START_CONCURRENCY: "${RELAY_START_CONCURRENCY:-4}"
+      RELAY_START_SPACING: "${RELAY_START_SPACING:-1.5}"
+      RELAY_START_NODE_GAP: "${RELAY_START_NODE_GAP:-2}"
+      REGISTER_SOCKS_PORTS: "${REGISTER_SOCKS_PORTS:-}"
+      REGISTER_SOCKS_USER: "${REGISTER_SOCKS_USER:-}"
+      REGISTER_SOCKS_PASS: "${REGISTER_SOCKS_PASS:-}"
+      REGISTER_COOLDOWN: "${REGISTER_COOLDOWN:-180}"
       RELAY_REFRESH_INTERVAL: "${RELAY_REFRESH_INTERVAL:-120}"
       RELAY_RECOVER_PER_ROUND: "${RELAY_RECOVER_PER_ROUND:-4}"
+      NODE_COOLING_SECONDS: "${NODE_COOLING_SECONDS:-1800}"
       RELAY_PROBE_TIMEOUT: "${RELAY_PROBE_TIMEOUT:-12}"
       RELAY_API_TOKEN: "${RELAY_API_TOKEN:-}"
       RELAY_PLAIN_WS: "${RELAY_PLAIN_WS:-0}"
@@ -87,7 +97,6 @@ services:
     volumes:
       - ${DATA_ROOT:-./data}/pool:/data
       - ${DATA_ROOT:-./data}/shared:/shared
-      - ${DATA_ROOT:-./data}/relay-nodes.tsv:/data/relay-root/relay/nodes.tsv:ro
       - ../instacloud-warp/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
       - ../instacloud-warp/relay-entrypoint.sh:/usr/local/bin/relay-entrypoint.sh:ro
       - ../instacloud-warp/relay-watchdog.sh:/usr/local/bin/relay-watchdog.sh:ro
