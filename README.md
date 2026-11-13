@@ -1,588 +1,317 @@
-# opencode2api
-
-[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md) | [Italiano](README.it.md)
-
-A Go gateway for **OpenCode Zen and Zen Go**. It exposes Chat Completions, Responses, and Anthropic Messages endpoints, translates between their native protocols, and manages upstream keys and proxies.
-
-The executable includes the WebUI. Running the service requires no Node.js runtime or database.
-
-## Capabilities
-
-- JSON and SSE responses across all three inference protocols.
-- Text, images, reasoning, function tools, tool calls, and tool results; file content where the target protocol can represent it.
-- Separate Zen and Go key pools, configurable tier preference, retries, and session affinity.
-- Optional anonymous Zen access with the OpenCode `public` credential.
-- Optional userspace Cloudflare WARP egress for free-model traffic, without TUN or root.
-- Direct, HTTP, HTTPS, SOCKS5, and SOCKS5H connections, including a proxy file.
-- Dynamic model discovery, native protocol metadata, and disk caches.
-- A separate management port with configuration editing, a Playground, diagnostics, token statistics, and live logs.
-- Configuration hot reload with validation before switching new requests to a replacement gateway.
-- Go subscription quota dashboard with remaining percentages, reset times, and available models.
-- Local API key creation, naming, enabling, disabling, and deletion with immediate updates.
-- Sticky `sota` / `sweet` model groups with ordering, failure fallback, streaming protection, and persisted state.
-
-See the [management console guide (Chinese)](docs/management.zh-CN.md) for the new pages and configuration.
-
-## Sponsors
-
-<table>
-  <tr>
-    <td width="190" align="center">
-      <a href="https://www.ipwo.net/?ref=githubopencode2api">
-        <img src="assets/IPWO.png" width="163" alt="IPWO">
-      </a>
-    </td>
-    <td>
-      <a href="https://www.ipwo.net/?ref=githubopencode2api">IPWO</a> residential proxies provide flexible network connectivity for AI development and API workflows, covering 195+ countries and regions with HTTP(S) and SOCKS5 support.<br>
-      Suitable for cross-region network testing, compliant data collection, and automated development. Dynamic, static, and unlimited proxy plans are available, with free testing and region selection. Discount code: <b>0200</b>.
-    </td>
-  </tr>
-</table>
-
-## Quick start
-
-Download a binary from [GitHub Releases](https://github.com/jasonxu114514/opencode2api/releases), or build with **Go 1.24 or newer**:
-
-```bash
-git clone https://github.com/jasonxu114514/opencode2api.git
-cd opencode2api
-cp config.example.json config.json
-go build -o opencode2api ./cmd/opencode2api
-```
-
-Before starting, edit `config.json`:
-
-1. Replace `server_keys` with your own local API key.
-2. Optionally supply Zen or Go keys. The example enables the anonymous free lane and leaves both upstream key arrays empty.
-3. Replace `webui.password`. The example enables the WebUI with username `admin`.
-
-```bash
-./opencode2api -config config.json
-```
-
-On Windows, use `Copy-Item config.example.json config.json`, build with `go build -o opencode2api.exe ./cmd/opencode2api`, then run `.\opencode2api.exe -config config.json`.
-
-The example listens on `127.0.0.1:8080` for the API and `0.0.0.0:8081` for the WebUI. Open `http://localhost:8081` locally. Restrict management access and use an HTTPS reverse proxy when accessing it over a network.
-
-Command-line options:
-
-| Option        | Default       | Purpose                            |
-| ------------- | ------------- | ---------------------------------- |
-| `-config`     | `config.json` | Configuration file path.           |
-| `-listen`     | Unset         | Override the API listen address.   |
-| `-web-listen` | Unset         | Override the WebUI listen address. |
-
-The configuration directory must be writable for password migration, configuration saves, and model caches.
-
-## Docker
-
-The published image is `ghcr.io/jasonxu114514/opencode2api`.
-
-```bash
-cp config.example.json config.json
-# Configure keys and replace the WebUI password before starting.
-docker compose up -d
-docker compose logs -f
-```
-
-Compose imports the host configuration into the `opencode2api-state` volume **only on first startup**. Subsequent changes should be made through the WebUI. To import an edited host configuration again:
-
-```bash
-docker compose cp config.json opencode2api:/var/lib/opencode2api/config.json
-docker compose restart
-```
-
-The container runs the service as an unprivileged user. Compose uses a read-only root filesystem, a writable state volume, and a temporary `/tmp` filesystem.
-
-WARP needs only outbound UDP (Cloudflare endpoint port `2408`), so the image's non-root, no-`NET_ADMIN` setup still works; do not switch to host networking or add `--cap-add` for it. If the container network blocks UDP, enabling WARP fails at startup.
-
-| Compose variable            | Default  | Effect                                            |
-| --------------------------- | -------- | ------------------------------------------------- |
-| `OPENCODE2API_VERSION`      | `latest` | Image tag. Pin a release tag for a fixed version. |
-| `OPENCODE2API_PORT`         | `8080`   | Host port mapped to container port 8080.          |
-| `OPENCODE2API_WEBUI_PORT`   | `8081`   | Host port mapped to container port 8081.          |
-| `OPENCODE2API_LISTEN`       | Unset    | Explicit container API listen override.           |
-| `OPENCODE2API_WEBUI_LISTEN` | Unset    | Explicit container WebUI listen override.         |
-| `OPENCODE2API_TRUSTED_PROXIES` | Unset | Proxy CIDRs trusted for `X-Forwarded-For`; `none` disables. |
-
-The last three variables become `LISTEN_ADDRESS`, `WEBUI_LISTEN_ADDRESS` and `TRUSTED_PROXIES` inside the container. `TRUSTED_PROXIES` defaults to loopback and private ranges; set it when the edge uses another address so per-client login limits see the real client instead of one shared proxy address. Empty values defer to the configuration file. While initializing a configuration, the entrypoint changes the example API address `127.0.0.1:8080` to `0.0.0.0:8080` so published ports can reach it.
-
-Changing host ports does not change container listeners. If you change the internal API port, also update the port mapping and the image health check, which uses port 8080.
-
-For a local image:
-
-```bash
-docker build -t opencode2api:local .
-docker volume create opencode2api-state
-docker run -d --name opencode2api \
-  -p 8080:8080 -p 8081:8081 \
-  -e CONFIG_SEED_PATH=/run/config/opencode2api.json \
-  -v "$(pwd)/config.json:/run/config/opencode2api.json:ro" \
-  -v opencode2api-state:/var/lib/opencode2api \
-  opencode2api:local
-```
-
-A `proxyfile` used in Docker must also be available inside the container at the configured path.
-
-## API usage
-
-`server_keys` authenticate clients to this gateway. They are separate from `zen_keys` and `go_keys` and are never used as upstream credentials.
-
-Send `Authorization: Bearer YOUR_LOCAL_API_KEY` or `x-api-key: YOUR_LOCAL_API_KEY`. Health checks require no authentication.
-
-| Method | Path                   | Description                                               |
-| ------ | ---------------------- | --------------------------------------------------------- |
-| GET    | `/v1/models`           | Models that can be routed with the current configuration. |
-| POST   | `/v1/chat/completions` | Chat Completions.                                         |
-| POST   | `/v1/responses`        | Responses.                                                |
-| POST   | `/v1/messages`         | Anthropic Messages.                                       |
-| POST   | `/v1/systemone`        | System One structured decisions.                          |
-| GET    | `/healthz`             | Readiness and resource summary.                           |
-
-Discover an available model first:
-
-```bash
-curl http://localhost:8080/v1/models \
-  -H "Authorization: Bearer YOUR_LOCAL_API_KEY"
-```
-
-Replace `MODEL_ID` below with an ID from that response.
-
-**Chat Completions**
-
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_LOCAL_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"MODEL_ID","messages":[{"role":"user","content":"Hello"}]}'
-```
-
-**Responses**
-
-```bash
-curl http://localhost:8080/v1/responses \
-  -H "Authorization: Bearer YOUR_LOCAL_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"MODEL_ID","input":"Hello"}'
-```
-
-**Anthropic Messages**
-
-```bash
-curl http://localhost:8080/v1/messages \
-  -H "x-api-key: YOUR_LOCAL_API_KEY" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"MODEL_ID","max_tokens":512,"messages":[{"role":"user","content":"Hello"}]}'
-```
-
-For streaming, add `"stream": true` to the body and use `curl -N`. Responses include an `x-request-id` for correlation. API request bodies are limited to 32 MiB.
-
-**System One**
-
-```bash
-curl http://localhost:8080/v1/systemone \
-  -H "Authorization: Bearer YOUR_LOCAL_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"MODEL_ID","state":"1 + 1 = 2","questions":{"arithmetic":{"type":"noul","instructions":"Is 1 + 1 equal to 2?"}}}'
-```
-
-System One pairs a free-form state with typed questions and returns typed answers, so the payload shares no shape with the chat/responses bridge and is relayed verbatim, never translated. Only models whose native protocol is System One are served here; a decision payload submitted on a message endpoint (`/v1/chat/completions`, `/v1/responses`) is likewise relayed verbatim instead of converted. Streaming upstream replies are relayed as-is without reset recovery.
-
-### Compatibility boundaries
-
-Requests using the upstream's native protocol retain provider-specific fields. Requests crossing protocols pass through a common representation; not every option has an equivalent. For example, Chat JSON output constraints and `seed` are not forwarded to Anthropic Messages. Unsupported content or tool types may be rejected.
-
-The gateway exposes the routes listed above. It does not implement embeddings, file uploads, image generation, or Responses retrieval and cancellation. It does not store conversation history; clients must supply the history or use features supported by the actual upstream.
-
-## Routing and models
-
-### Model discovery
-
-The gateway refreshes Zen/Go `/v1/models` and OpenCode's [capability catalog](https://models.opencode.ai/api.json) on the configured interval. Native protocols and model limits are tracked separately for each tier. OpenCode's Zen/Go documentation is a fallback for protocol discovery.
-
-`models.protocols` overrides discovery:
-
-```json
-{
-  "models": {
-    "refresh_seconds": 300,
-    "protocols": {
-      "custom-model": "chat"
-    }
-  }
-}
-```
-
-Allowed protocol values are `chat`, `responses`, and `anthropic`. Models using unsupported native protocols are filtered from discovery unless overridden.
-
-Cost, deprecation, and model limits come from the official [OpenCode metadata endpoint](https://models.opencode.ai/api.json), refreshed every 24 hours. OpenCode's capability catalog remains authoritative for context and token limits; metadata `limit.context`, `limit.input`, and `limit.output` fill fields missing from that catalog. These limits are exposed by `/v1/models` as `context_window`/`context_length`, `max_input`, and `max_output` for discovery clients such as CLIProxyAPI and Pi. Metadata requests use a 30-second timeout per HTTP client. Refresh failures retain existing data.
-
-Each `/v1/models` entry also carries `cost` (USD per million tokens: `input`, `output`, `cache_read`, `cache_write`, plus OpenClaw's `cacheRead`/`cacheWrite`) when the metadata states a price. Reasoning models list their levels in `reasoning_efforts` and in OpenClaw's `compat.supportedReasoningEfforts`: `minimal` through `max`, capped at the probed ceiling when the model's effort is `auto`. A forced or probed level is reported as `default_reasoning_effort`. Cache prices appear after the next metadata refresh.
-
-### Anonymous access and fallback
-
-With `anonymous: true`, either condition makes a model eligible for the anonymous Zen lane:
-
-- Its ID contains `free`, case-insensitively.
-- OpenCode metadata reports zero input and output cost and the model is not deprecated.
-
-Eligibility is a routing decision; the upstream can still reject or rate-limit the request. Anonymous requests use `public` in the upstream authentication header.
-
-The routing sequence is:
-
-1. For an eligible model, try up to `performance.max_anonymous_exits` available anonymous proxies once each. Every proxy uses the v2 `/inference` lane; the v1 `/zen` fallback is retired for free models and its call site is commented out.
-2. Try authenticated tiers in `prefer` order, using only tiers with a configured key and a route for that model.
-3. Apply `retry.max_attempts` separately to each authenticated tier.
-
-Anonymous attempts are not cut short by `retry.max_attempts`, but all attempts share the request timeout. Network errors, authentication failures, rate limits, and server errors can rotate exits. A request-level `400`/`413`/`422` (for example `context_length_exceeded`) ends the request immediately: another exit or tier cannot change the request. An IP-level abuse `403` blocks only that exit; if every exit is blocked, the gateway stops walking them, and an authenticated Go key can still serve the request.
-
-When the free tier is blocked for the whole deployment (an IP-level `403` abuse response), retrying only extends the penalty, so an optional lane-level circuit breaker can stop the probing. With `models.anonymous_backoff` configured, `threshold` consecutive failed anonymous attempts or an all-exits IP block pause the whole anonymous lane for `base_hours`, doubling on every further trip up to `max_hours`. A single non-abuse `403` or `429` does not open the breaker; it counts toward the threshold. While paused, requests skip the lane entirely: no proxy is drawn, no upstream request is made, and routing goes straight to the authenticated tiers. Catalog refreshes and availability probes honour the pause as well. When the window expires one request wins the half-open probe; success closes the breaker and restores the free lane, failure opens the next, longer window. The block is absent, and so the breaker stays off, by default.
-
-Requests are encoded for each tier's own protocol. With `performance.first_event_timeout_seconds` enabled, a successful SSE response is held until the first complete data event. A timeout or disconnect before that event uses the existing key/proxy retry budget; comments do not satisfy the timeout. Once released downstream, the stream is never replayed. The default is `0` (disabled); try `15` seconds for upstreams that accept requests but send no events. This bounds the first event, not the first text token, and does not apply to System One. Rotation aliases use their separate `rotation.first_output_seconds` timeout. A recognized stale Responses reasoning reference can trigger one repair pass; selected-key diagnostics never use that replay.
-
-When only anonymous access is configured, `/v1/models` exposes only models eligible for that lane.
-
-Free models never need a Zen key: with `anonymous: true` they are served by the public lane, and a configured key is only their fallback. To keep keys but expose free models only, set `models.free_only: true`. Paid models then disappear from `/v1/models`, direct requests for them are rejected, and rotation aliases keep only free members; free models may still fall back to the configured keys.
-
-### WARP egress for free models
-
-`warp.enabled` moves every free-model request on a free lane — the anonymous lane, the free-model fallback through a Zen key, free-model availability probes, and the anonymous catalog refresh — onto a userspace Cloudflare WARP tunnel. Those requests use no proxy, so the free tier sees the WARP exit address instead of a configured node. Go-plan keys and paid models keep their proxy bindings.
-
-The tunnel lives inside the gateway process: it registers a WARP device, speaks WireGuard over UDP to Cloudflare, and terminates in a userspace network stack. It needs no TUN device, root, `NET_ADMIN`, or routing-table change, but the host or container must be able to send UDP to Cloudflare's endpoint (port `2408`). Registration and the `warp=on` trace probe run at startup; if WARP cannot initialize, startup fails instead of silently falling back to proxies. Enabling it through the WebUI is also fail-closed: a bad value returns an error and the previous runtime keeps serving.
-
-`warp.pool_size` (1–32, default `2`) is an upper bound, not a fixed count. The first exit registers synchronously and gates readiness; the pool then registers half of the ceiling (at least one) in the background, so a burst finds warm exits instead of waiting for registrations. The active ring follows concurrency: one exit per in-flight lease plus a spare, never more than the maximum. Surplus exits that stay idle for 60 seconds are retired, so a quiet period scales back down. An exit answered with 429 or 403 is retired immediately and a pre-registered exit takes its place — a free-model request keeps switching to another exit and only returns the last 429 to the client once `retry.max_attempts` is spent — and the retired exit is re-registered in the background right away. Registrations are serialized; Cloudflare's 429/Retry-After answer sets the pacing instead of a fixed delay. If the colo hands out fewer distinct egress blocks than the preload, the pool backs off instead of registering forever, and automatic free-model probes skip a pool without a spare exit and stop the sweep after one probe retires an exit. `warp.stack` selects `ipv6` (default), `ipv4`, or `dual`.
-
-The upstream free quota is scoped to the egress block, so rotation only helps when a replacement leaves from a different one: an IPv6 exit is keyed and cooled by its `/64` for 30 minutes, an IPv4 exit by its `/32`. Cloudflare's WARP IPv4 egress is usually one shared NAT address, which other users routinely exhaust; the IPv6 stack gets an egress derived from the outer WireGuard source. Set `warp.source_ipv6` to an IPv6 prefix routed to the host (usually a `/64`), with the default `ipv6` stack to make every exit bind its own source address from that prefix. The prefix needs `IPV6_FREEBIND` on Linux (the gateway sets it) or addresses already assigned to an interface. Endpoint family is not probed in advance: the handshake tries IPv6 endpoints first and falls back to IPv4 ones when none answer (the exit then egresses from the shared address). Leave `source_ipv6` empty to keep the host's default source address. On networks whose WARP egress pool is saturated every fresh exit can still answer 429; the gateway then churns exits without ever surfacing a 429 before the attempt budget is spent. `/healthz` reports a `warp` block and answers 503 while WARP is enabled but no exit is active; `no_healthy_proxies` only blocks readiness when WARP is off or Go keys need proxies. Diagnostics acquire an exit but never rotate or penalize it. Turning WARP off restores proxy routing for the free lanes.
-
-### Official system prompt
-
-Every shaped free-model request carries the OpenCode CLI's own system prompt — its base instructions, the `<env>` block, and the built-in skill listing — because the free tier validates agent-shaped traffic. The v1 `/zen` lane uses the 1.x tool names; `/inference` and `/zen/go` use the 2.x names. The environment block names the requested model, the gateway's working directory, the platform, and a UTC date.
-
-Injection is protocol-aware: Chat system and developer messages are folded into one leading `system` message, Anthropic receives a `system` value (a string, or a leading text block when the caller sent blocks), and Responses receives `instructions`. A body whose system content already contains the marker `You are opencode, an interactive CLI tool` is passed through, so a client that sends the official prompt never gets a second copy. Free models served by a Zen or Go key receive the same shaping even though they still leave through that tier's proxy.
-
-### Tool shaping
-
-On every shaped free-model request the gateway replaces each named client tool with an opaque wire name, `clint_` plus the first 12 hex characters of the client name's SHA-256 (collisions get a `_2`, `_3`, … suffix), and appends the complete official tool set for the lane: the 1.x definitions (`bash`, `edit`, `glob`, `grep`, `read`, `skill`, `task`, `todowrite`, `webfetch`, `websearch`, `write`) on `/zen`, and the 13-tool 2.x set on `/inference` and `/zen/go`. The digest is not cosmetic: the free tier refuses a shaped body that still carries another client's vocabulary — a Claude Code request that declares both `ReportFindings` and `ScheduleWakeup` is answered with `FreeUsageLimitError`, and removing either name lifts the refusal — so no client tool name reaches the wire. Requests without a `tools` array, with an empty one, or with a legacy `functions` array get the same official set; `tool_choice`, legacy `function_call`, and the tool-call history are rewritten to match. Responses built-in tools and Anthropic server tools are left untouched.
-
-Responses are restored to the names the client declared, for streaming and non-streaming replies, including a Chat tool name split across chunks. If the upstream calls an official tool the client never declared, that name passes through unchanged: the gateway does not replay or hide official tool calls.
-
-### Free model availability
-
-The gateway probes models whose IDs contain `free` (case-insensitive), or whose metadata reports zero input/output cost without deprecation, with a short request using its native protocol. It tries the enabled anonymous lane first and then one configured Zen Key. With `warp.enabled`, every probe lane leaves through WARP instead of a proxy; when no exit can be acquired the probe reports `warp_unavailable` and stays inconclusive. A valid completed response on either lane keeps the model enabled; the model is disabled in discovery and routing only when every attempted lane explicitly reports that the model does not exist or has been retired. Authentication errors, rate limits, timeouts, transport errors, 5xx responses, and malformed replies are inconclusive: they do not create a new disable, and are checked again in one hour. Probe traffic does not alter production key/proxy cooldowns or request statistics. It still reaches the upstream and may consume its free allowance.
-
-System One models use a native `noul` question asking whether 1 + 1 equals 2; they are never sent chat/tool payloads. Model discovery includes `native_protocol` and `supported_endpoints`; rotation aliases are listed only when Go keys and eligible models exist. Legacy v1.3.6 disables are cleared on load and scheduled for immediate recheck because those probes used invalid session IDs.
-
-The intervals are fixed: enabled models are checked every **1 hour**, models confirmed unavailable every **24 hours**. An inconclusive due recheck of a disabled model preserves its original disable reason and schedules another retry in 24 hours. A successful recheck restores the model automatically. The WebUI **Free model availability** page can restore it immediately, which puts the model under manual control: it stays enabled and is excluded from automatic probing, so later probe results cannot overwrite it. Use the per-model **manual/automatic toggle** on the same page to return it to automatic probing; the next scheduler pass then schedules a probe. Records left as `manually_enabled` by older versions migrate to manual control on load. An in-flight probe cannot undo a manual restore. Models without a usable Zen/anonymous lane, or without a supported inference protocol, are skipped.
-
-Manual control also pauses effort discovery for `reasoning.effort=auto`; learned levels stop being forced after two hours without verification. Returning to automatic control allows effort discovery to resume.
-
-State survives restarts in `config.json.<upstream-fingerprint>.availability.json`, separated by the Zen upstream URL. The background scheduler checks for due models once per minute, skips manually controlled models, and probes the rest sequentially, with a 60-second timeout per lane. No channels available means no automatic disable.
-
-Administration endpoints (login required; writes also require CSRF): `GET /api/models/availability`, `POST /api/models/probe` (marks every automatic free model due and starts a probe sweep right away, so the WebUI's refresh status button re-probes instead of only reloading the cached view), `POST /api/models/restore` with `{"model":"MODEL_ID"}` (restores and takes manual control), and `POST /api/models/manual` with `{"model":"MODEL_ID","manual":true|false}` to switch between manual and automatic control.
-
-### Sessions and proxies
-
-Keys are initially spread across proxies. Real traffic can trigger proxy checks, key rebinding, and cooldowns. Unhealthy proxies are rechecked every 15 minutes against Cloudflare trace.
-
-A stable session hash selects the preferred key or anonymous proxy. Send an explicit `x-session-id` to separate independent conversations. The gateway also accepts the `x-opencode-session`, `x-session-affinity`, `session_id`, `conversation-id`, and `conversation_id` headers, the `conversation_id` and `metadata.session_id` body fields, and the session ID inside Claude Code's `metadata.user_id`.
-
-Sessions and projects the gateway derives itself are scoped to the caller's server key, so different keys never share an upstream session, preferred key, or anonymous proxy. Official OpenCode sessions (`ses_…`) sent by the client are kept as-is. Derived session ids are salted per process, so restarting the gateway re-mints them instead of resuming the upstream session of the previous run. Without an explicit ID, the system prompt and the first user message are used as a seed. Conversations under the same key that begin with the same system prompt and content can therefore still share affinity; give users who must stay isolated their own server keys. Changing pool membership can change the selected node.
-
-Cooldowns grow exponentially up to eight times `performance.failure_cooldown_seconds`, and a longer `Retry-After` is honored. A configured `models.anonymous_backoff` breaker is a separate lane-level guard: it pauses the whole anonymous lane for hours, while these cooldowns stay per exit and short. If every authenticated key is cooling down, routing may try the key whose cooldown ends first. Anonymous nodes still in cooldown are skipped.
-
-## Configuration reference
-
-See [config.example.json](config.example.json) for a complete starting configuration. JSON supports `//` and `/* ... */` comments; unknown fields and invalid values are rejected.
-
-### Keys, listeners, and routing
-
-| Field                       | Default / requirement                                                       |
-| --------------------------- | --------------------------------------------------------------------------- |
-| `listen`                    | `127.0.0.1:8080`.                                                           |
-| `server_keys`               | At least one local key is required.                                         |
-| `zen_keys`, `go_keys`       | At least one upstream key is required unless anonymous access is enabled.   |
-| `anonymous`                 | `false`.                                                                    |
-| `warp.enabled`              | `false`; free-lane traffic leaves through Cloudflare WARP and no proxy.    |
-| `warp.pool_size`            | `2`; upper bound on WARP exits (half pre-registered in the background; the active ring follows concurrency), 1–32. |
-| `warp.stack`                | `ipv6`; `ipv6`, `ipv4`, or `dual`.                                          |
-| `warp.source_ipv6`          | empty; IPv6 prefix (`/64`) each exit binds its outer source from; requires `stack = "ipv6"`. |
-| `prefer`                    | `go`; accepts `go` or `zen`.                                                |
-| `upstream.zen`              | `https://opencode.ai/zen`.                                                  |
-| `upstream.go`               | `https://opencode.ai/zen/go`.                                               |
-| `upstream.anonymous`        | `https://opencode.ai/inference`; the only anonymous lane (the retired `/zen` fallback is commented out in `anonymousUpstreams`). |
-| `proxies`                   | Falls back to `["direct"]` when both proxy sources are empty.               |
-| `proxyfile`                 | Optional; relative paths resolve beside the configuration file.             |
-| `models.refresh_seconds`    | `300`; minimum 1.                                                           |
-| `models.protocols`          | `{}`; per-model native protocol overrides.                                  |
-| `models.free_only`          | `false`; expose and route only free models, even with Zen or Go keys.       |
-| `models.anonymous_backoff`  | Absent (off); `{threshold, base_hours, max_hours}`, defaulting to `6`, `1`, `24`. |
-| `reasoning.effort`          | Empty (off); `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `none`. |
-| `reasoning.effort_by_model` | `{}`; per-model overrides of `reasoning.effort`.                            |
-
-### Forced thinking level
-
-`reasoning.effort` sets the thinking level used upstream when a request does not
-state one of its own, and `reasoning.effort_by_model` overrides it for the model
-IDs it names. It applies to all three protocols, in either direction of
-conversion, and matters most for cross-protocol traffic: an Anthropic
-`thinking.budget_tokens` can only be approximated by the Chat and Responses
-surfaces, so a forced level reaches a rung that the budget alone cannot express.
-
-```json
-{
-  "reasoning": {
-    "effort": "high",
-    "effort_by_model": { "claude-opus-5": "max" }
-  }
-}
-```
-
-Explicit client disables remain disabled across protocol conversion: Anthropic
-`thinking.type="disabled"` and Chat/Responses effort `"none"` cannot be re-enabled
-by a configured default.
-
-Levels are reported faithfully in both directions. An explicit
-`output_config.effort` survives conversion instead of being shadowed by a
-`thinking` block, `budget_tokens` keeps its rung (`8192` is `high`, `32000` is
-`xhigh`, so the two stay distinguishable), and the Responses target carries the
-level as `reasoning.effort` rather than dropping it.
-
-The WebUI Configuration Center exposes the same default and per-model fields.
-The management API returns them as `reasoning` from `GET /api/config` and accepts
-the object in `PUT /api/config`; clients that omit the field keep the existing
-value, while sending an empty object clears it.
-
-Proxy entries accept `direct`, `http://`, `https://`, `socks5://`, and `socks5h://`, including URL credentials. The inline list is merged with `proxyfile` and deduplicated in order.
-
-A proxy file contains one entry per line and supports blank lines and comments:
+# warp-pool-producer（会话 B）
+
+在异国 Linux 节点批量生产 WARP 隧道：链式注册绕过同 IP 限速，强制纯 IPv6 出站，`/64` 去重，每 15 分钟换 Endpoint 重摇号，并以带账密认证的 SOCKS5 端口暴露给 opencode2api 网关。
+
+## 契约
+
+| 项目 | 值 |
+| --- | --- |
+| 端口 | `1081`–`1096`（16 个实例） |
+| SOCKS5 认证 | `warpuser` / `$SOCKS_PASS` |
+| 出口 | 纯 IPv6（`AllowedIPs = ::/0`），禁止 IPv4 出口 |
+| 去重 | 同容器内 16 个端口的 `/64` 前缀互不相同 |
+| 存量 `/48` 禁区 | SIN `2a09:bac5:55*` / `2a09:bac1:65*`；IAD `2a09:bac5:c82*`；FRA `2a09:bac1:27b*` / `2a09:bac1:1e*` |
+| 换血周期 | `900` 秒（15 分钟，对齐网关额度 429 硬冷却 `static_proxy_rate_limit_cooldown_seconds=900`；旧 main 的 `free_tier_block_seconds` 为死代码） |
+| 边界 | 不修改 opencode2api 任何代码 |
+
+## 目录结构
 
 ```text
-# Primary proxy
-http://user:password@127.0.0.1:7890
-socks5://127.0.0.1:1080  # Backup proxy
-direct
+warp-pool-producer/
+├── Dockerfile
+├── docker-compose.yml
+├── entrypoint.sh                  # 注册 / 渲染 / 去重 / 换血 / 导出
+├── healthcheck.sh                 # 容器 HEALTHCHECK
+├── endpoints.txt                  # 32 个 Cloudflare Anycast IP:PORT
+├── patches/wgcf-socks5-proxy.patch
+├── scripts/export-egress.sh       # 一键导出 + --verify 自检
+├── scripts/firewall-allow-center.sh
+├── scripts/bore-supervisor.sh     # NAT/PaaS 无公网入站时的 bore 中继保活
+├── .env.example
+├── Makefile
+└── README.md
 ```
 
-Comment markers are `#`, `;`, and `//` at the start of a line or after whitespace.
+## 前置条件
 
-#### Rotating proxy pools
+- 异国 Linux VPS（JP / KR / GB / AU），已安装 Docker 与 compose v2。
+- 节点有公网 IPv4，或可用 bore 中继（见「无公网入站：bore 中继」）。
+- 出站 UDP 到 Cloudflare Anycast 的 `2408 / 500 / 1701 / 4500` 未被封。
+- 不需要宿主机 IPv6、不需要 TUN、不需要 `--privileged`。
+- 必须部署在 Linux 上：`network_mode: host` 在 Docker Desktop（Windows/macOS）不适用。
 
-Suffix an entry with `#pool` (or prefix it with `pool+`) to declare that the endpoint is a rotating proxy pool such as [Resin](https://github.com/Resinat/Resin), where every new TCP connection exits from a different IP:
-
-```text
-http://127.0.0.1:7890#pool
-socks5://127.0.0.1:1080#pool
-pool+http://127.0.0.1:7891
-```
-
-A pool entry is handled differently from a static proxy:
-
-| Behavior                  | Static proxy                                                        | `#pool` entry                                                                |
-| ------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Connection reuse          | Keep-alive plus HTTP/2 multiplexing (`performance.*` pool settings) | A fresh TCP + CONNECT tunnel per request (`DisableKeepAlives`, no HTTP/2)    |
-| Failure cooldown          | 15s–120s exponential backoff, inflated by `Retry-After`             | None: the next request simply draws a new exit IP                             |
-| Health eviction           | Marked unhealthy, keys rebound, rechecked every 15 minutes          | Never evicted; the health check is skipped entirely                           |
-| Anonymous lane retries    | One visit per exit, up to `performance.max_anonymous_exits` exits   | Up to `retry.max_attempts`, cycling the pool entry                            |
-
-Use it when the endpoint behind the URL already performs the rotation and the pool's own exit IPs are individually rate-limited or flaky; the gateway then treats each attempt as a fresh endpoint instead of pinning the conversation to one exit. A single `#pool` entry is enough — you no longer need to list dozens of exits. Static entries keep the pooling behavior described below.
-
-### Timeouts and connection pools
-
-| Field                                   | Default | Meaning                                                |
-| --------------------------------------- | ------- | ------------------------------------------------------ |
-| `retry.max_attempts`                    | `3`     | Attempts per authenticated tier, including the first.  |
-| `retry.timeout_seconds`                 | `300`   | Total inference timeout, including stream consumption. |
-| `performance.attempt_timeout_seconds`   | `0`     | Whole-attempt bound; 0 uses the request timeout.       |
-| `performance.max_anonymous_exits`       | `8`     | Distinct static proxy exits per anonymous request.     |
-| `performance.free_tier_block_seconds`   | `900`   | Cool-down for an exit the free tier flagged.           |
-| `performance.connect_timeout_seconds`   | `5`     | Connection establishment timeout.                      |
-| `performance.failure_cooldown_seconds`  | `15`    | Base failure cooldown.                                 |
-| `performance.max_idle_conns`            | `2048`  | Idle connection limit per proxy transport.             |
-| `performance.max_idle_conns_per_host`   | `256`   | Idle connection limit per host and transport.          |
-| `performance.max_conns_per_host`        | `0`     | Connection limit per host; 0 is unlimited.             |
-| `performance.idle_conn_timeout_seconds` | `120`   | Idle connection lifetime.                              |
-
-The per-attempt header timeout is capped by the request timeout. Set it below the total timeout if a slow upstream should leave time for fallback. Expired request contexts stop further attempts without penalizing unused keys or proxies.
-
-### Logging and management
-
-| Field                         | Default / requirement                                         |
-| ----------------------------- | ------------------------------------------------------------- |
-| `logging.level`               | `info`; accepts `debug`, `info`, `warn`, `error`.             |
-| `logging.ring_size`           | `2000`; range 100–50,000.                                     |
-| `logging.dump_request_bodies` | `false`. Requires `debug` logging to emit outbound bodies.    |
-| `webui.enabled`               | `false` when omitted; the example sets it to `true`.          |
-| `webui.listen`                | `0.0.0.0:8081`.                                               |
-| `webui.username`              | Required when the WebUI is enabled; the example uses `admin`. |
-| `webui.password`              | Bootstrap password with a minimum length of 10.               |
-| `webui.password_hash`         | Generated Argon2id hash; replaces the plaintext password.     |
-| `webui.session_ttl_minutes`   | `720`; range 5–10,080.                                        |
-
-On startup, a bootstrap password is hashed and removed from the configuration. The backup containing that bootstrap plaintext is deleted. Keep configuration files and backups private: upstream keys and proxy credentials remain necessary configuration secrets.
-
-Body dumps are opt-in and capped at 64 KiB per prepared body. Configured secrets are redacted, but conversation content may still be sensitive.
-
-## WebUI and diagnostics
-
-The management listener serves the UI and `/api/*` routes. Authentication uses one administrator account, server-side sessions, HttpOnly/SameSite cookies, CSRF checks for writes, and login throttling.
-
-| Management route                                 | Purpose                                                               |
-| ------------------------------------------------ | --------------------------------------------------------------------- |
-| `POST /api/auth/login`                           | Log in and obtain a session cookie and CSRF token.                    |
-| `GET /api/auth/session`, `POST /api/auth/logout` | Inspect or end the session.                                           |
-| `GET /api/config`, `PUT /api/config`             | Read masked configuration or apply changes.                           |
-| `POST /api/config/reload`                        | Reload the file from disk.                                            |
-| `POST /api/config/reveal`                        | Reveal configured secrets after password verification.                |
-| `PUT /api/account`                               | Update credentials after password verification; invalidates sessions. |
-| `GET /api/monitor`                               | Request, token, upstream, and resource statistics.                    |
-| `GET /api/debug/models`                          | Model routes, key fingerprints, and metadata diagnostics.             |
-| `POST /api/debug/inference`                      | Run a Playground request.                                             |
-| `GET /api/logs`, `GET /api/logs/stream`          | Recent logs or a live SSE subscription.                               |
-
-Playground requests require a session and `X-CSRF-Token` and are limited to 12 per minute per client IP:
-
-```json
-{
-  "protocol": "chat",
-  "key": { "mode": "auto" },
-  "request": {
-    "model": "MODEL_ID",
-    "messages": [{ "role": "user", "content": "Hello" }]
-  }
-}
-```
-
-The server forces `stream: false`. Use `{"mode":"selected","tier":"zen","id":"KEY_FINGERPRINT"}` to test a specific key from `/api/debug/models`. A selected request makes at most one upstream attempt, without anonymous access, key rotation, tier fallback, or reasoning replay.
-
-**Both automatic and selected diagnostics preserve production key cooldowns, failure counts, proxy health, and bindings.** They still make real upstream requests, can consume provider quota, and appear in monitoring.
-
-After execution, the management endpoint returns HTTP 200 with the actual result in `ok`, `http_status`, `request_id`, `route`, and `response`. Selected-key results also include `selected_key` and `key_test`: `usable`, `rejected`, `rate_limited`, `transport_error`, `upstream_error`, `request_error`, or `unavailable`. Invalid management input, authentication, CSRF, and throttling retain their own HTTP error statuses.
-
-### Interface language
-
-The WebUI loads its translations from `webui/js/i18n.js`. It ships with **简体中文** (default), **English**, **Tiếng Việt**, and **Italiano**. The original Simplified Chinese copy lives in `index.html` and `webui/js/` and stays the fallback for every string without a translation, so adding a language never rewrites the original.
-
-- The selector sits in the topbar, and on the login card.
-- The choice is stored in `localStorage` under `opencode2api.ui.lang`.
-- Switching re-renders both static text (`data-i18n`, `data-i18n-attr`) and JavaScript-generated text without reloading the page.
-- Dates and times follow the selected locale as well.
-
-To add a language, add one block to `DICTIONARY` in `webui/js/i18n.js`, then register its code in `SUPPORTED`, `LABELS`, `FLAGS`, and `DATE_LOCALES`, and add it to the `browserLocale` detection chain.
-
-### Saving and reloading
-
-The server validates a candidate configuration and builds its replacement gateway before saving and switching. Failed validation or persistence leaves the active gateway in place. Requests already running continue on their original gateway.
-
-Keys, proxies, upstream URLs, retry settings, model settings, logging, and routing preferences apply to new requests immediately. Changes to `listen`, `webui.listen`, or `webui.enabled` require a process restart. Saved JSON is normalized; comments are not retained.
-
-## Monitoring and persistence
-
-Request outcomes describe the completed inference. A failed SSE response or truncated stream counts as an error even when HTTP 200 was already sent; its outcome is `stream_error`. Client cancellations are recorded as `client_canceled`. The WebUI displays those outcomes alongside the HTTP status.
-
-Upstream **attempt** records measure the HTTP exchange through receipt of response headers. Their success and latency are separate from completion of the full JSON body or stream.
-
-Token statistics use reported usage only. Input tokens include cache reads and writes; cached tokens separately count cache reads. Missing usage is not estimated, and coverage shows how many routed inference requests reported usage. `usage.server_keys` splits requests and tokens by the local server key the caller authenticated with (its fingerprint, as shown in `/api/api-keys`); Playground traffic is counted under `playground`.
-
-| Data                                                      | Storage / retention                                                                          |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Sessions, metrics, token totals, latest Playground result | Process memory; cleared on restart.                                                          |
-| Request and attempt details                               | Recent hour, capped at 10,000 requests and 20,000 attempts; API returns at most 500 of each. |
-| Live log ring                                             | Process memory; size set by `logging.ring_size`.                                             |
-| Structured logs                                           | JSON on stdout; collect externally for durable history.                                      |
-| Configuration and previous version                        | `config.json` and `config.json.bak`.                                                         |
-| Model directory cache                                     | `config.json.models.catalog.json`.                                                           |
-| Price/deprecation cache                                   | `config.json.models.dev.json`.                                                               |
-
-Cache filenames are based on the actual configuration path. Lifetime counters mean the current process lifetime. Instances do not share sessions or monitoring state.
-
-### Health checks
-
-`/healthz` does not increment monitoring counters or trigger network requests. It reports resource counts without keys or proxy addresses.
-
-- HTTP 503: initial catalog pending, no models routable with the current configuration, or no healthy proxies.
-- HTTP 200: ready, including when a usable catalog cache is stale. In that case the model status is `stale` and overall status is `degraded`.
-
-The staleness threshold is twice `models.refresh_seconds`, with a minimum of 60 seconds. Readiness is a discovery and resource check; it does not verify that an upstream key will accept the next inference.
-
-## Development
-
-Go source is organized into packages by responsibility. The command wires the service together; implementation packages live under `internal/`.
-
-```text
-cmd/
-  opencode2api/main.go    CLI flags, startup, and graceful shutdown
-internal/
-  admin/                 Management API, login sessions, and Playground
-  buildinfo/             Version shared by health and management endpoints
-  config/                Configuration, persistence, passwords, and redaction
-  gateway/               HTTP routing, retries, pools, refresh, and runtime
-  httpx/                 Shared HTTP responses, body handling, and headers
-  identity/              Request IDs and session affinity
-  jsonutil/              JSON access and decoding helpers
-  models/                Model catalog, capabilities, pricing, and caches
-  protocol/              Request/response conversion and SSE parsing/output
-  telemetry/             Request tracking, metrics, logs, and recovery
-webui/
-  embed.go               Embeds the static assets into the executable
-  index.html             Page structure
-  css/                   Design tokens, base styles, components and page layouts
-  js/                    ES modules: shell, i18n, shared helpers and one module per page
-```
-
-Suggested reading order:
-
-1. [Command entry](cmd/opencode2api/main.go) → [runtime management](internal/gateway/runtime.go) → [HTTP handlers](internal/gateway/gateway.go).
-2. [Upstream attempts](internal/gateway/upstream.go) and [model routing](internal/models/catalog.go) explain how a request reaches a provider.
-3. [Request conversion](internal/protocol/request.go), [response conversion](internal/protocol/response.go), and [stream transport](internal/protocol/stream.go) cover protocol behavior.
-4. [Management routes](internal/admin/server.go) and [WebUI logic](webui/js/main.js) cover configuration and diagnostics.
-
-Run Go formatting, analysis, and the command build:
+## 快速开始
 
 ```bash
-gofmt -w cmd internal webui
-go vet ./...
-go build -o opencode2api ./cmd/opencode2api
+cp .env.example .env
+# 编辑 .env，至少填写 EXTERNAL_HOST=节点公网IPv4
+docker compose up -d --build
+docker logs -f warp-pool-producer
 ```
 
-For local development, start the service with `go run ./cmd/opencode2api -config config.json`. Release builds still inject the version with `-ldflags "-X main.version=vX.Y.Z"`.
+首轮完成后日志会出现：
 
-Node.js is only needed for the WebUI JavaScript syntax check:
+```text
+Active Unique /64 Pool Size: 16 / 16
+================= egress-ext.txt (copy to session A) =================
+socks5://warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1081
+...
+socks5://warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1096
+======================================================================
+```
+
+`egress-ext.txt` 只写入首轮去重后可用的端口；若不足 16 个，后续健康检查与换血会补齐并重写该文件。
+
+受限网络构建（Alpine 源 / Go module 源）：
 
 ```bash
-for f in webui/js/*.js webui/js/pages/*.js; do node --input-type=module --check < "$f"; done
+docker compose build \
+  --build-arg APK_MIRROR_HOST=mirrors.aliyun.com \
+  --build-arg GOPROXY_URL=https://goproxy.cn,direct
+# 或写进 .env 后 docker compose up -d --build
 ```
 
-`.editorconfig`, `.gitattributes`, and Go formatting standardize the source. CI runs `go vet` and builds with Go 1.24 and stable Go on Linux/Windows, plus Go formatting, WebUI syntax, and entrypoint shell syntax checks. Release archives include all four READMEs.
+放行中心三台容器的出站 IPv4：
 
-## Troubleshooting
+```bash
+sudo bash scripts/firewall-allow-center.sh
+```
 
-| Symptom                              | Check                                                                                     |
-| ------------------------------------ | ----------------------------------------------------------------------------------------- |
-| API returns 401                      | Use a configured local `server_keys` value.                                               |
-| Health remains `starting`            | Inspect catalog refresh logs and outbound connectivity; add protocol overrides if needed. |
-| No models are exposed                | Check configured tiers, anonymous eligibility, and native protocol support.               |
-| Requests return 502/504              | Inspect upstream attempts, credentials, proxies, and total/per-attempt timeouts.          |
-| HTTP 200 but generation failed       | Inspect the SSE error event and request outcome, not only HTTP status.                    |
-| Host edits have no effect in Docker  | The active file is in the state volume; import it again or use the WebUI.                 |
-| Container ports are unreachable      | Check listener addresses, published ports, and the active volume configuration.           |
-| Monitoring disappeared after restart | Monitoring is stored only in memory; collect stdout logs externally.                      |
+导出与自检：
 
-## Acknowledgements
+```bash
+bash scripts/export-egress.sh --host NODE_PUBLIC_IP --out egress-ext.txt
+# --verify 会从 127.0.0.1 逐个探测，必须在节点本机执行
+bash scripts/export-egress.sh --host NODE_PUBLIC_IP --verify
+```
 
-Thanks to the [LINUX DO](https://linux.do) community for its support.
+### 无公网入站：bore 中继（可选）
 
-### Adaptive reasoning effort
+PaaS/免费容器常没有可入站公网端口。此时让 producer 继续监听 `127.0.0.1:1081..1096`，用 `bore` 把每个端口映射到公网中继：
 
-Set `reasoning.effort` (or a per-model override) to `auto` to use the highest effort successfully validated by the free-model probe. Existing concrete levels retain their meaning and client-specified effort takes precedence. No model-name allowlist is maintained.
+```bash
+# 默认 127.0.0.1:1081-1096 -> bore.pub:40001-40016
+nohup bash scripts/bore-supervisor.sh > /tmp/bore-supervisor.out 2>&1 &
 
-After a baseline succeeds, reasoning-capable models are probed in `max`, `xhigh`, `high`, `medium`, `low`, `minimal` order. Only an explicit reasoning-parameter rejection advances to a lower level. Transient failures stop the search and cannot be interpreted as a lower capability ceiling. If every level is rejected, no reasoning override is injected.
+# 自定义端口段（例如第二节点）
+PORT_START=2081 PORT_END=2096 BORE_PORT_START=41001 \
+  nohup bash scripts/bore-supervisor.sh > /tmp/bore-supervisor.out 2>&1 &
+```
 
-Observations are persisted by upstream URL, model and native protocol, displayed in the availability page, and used for at most two hours. Active probes cover only free Zen/anonymous models; Go/paid models, unknown capabilities and unverified levels receive no automatic override. Setting `auto` does not expand the probe scope or guarantee that upstreams enforce every accepted field. Probing may require several small requests per model and uses upstream allowance.
+- 映射是线性的：`remote = BORE_PORT_START + (local - PORT_START)`。
+- 脚本每 `CHECK_INTERVAL`（默认 30s）检查一次，只重启掉线的端口；pidfile 与日志在 `LOG_DIR`（默认 `/tmp`）。
+- 交给网关的清单改用中继地址：`socks5://warpuser:$SOCKS_PASS@bore.pub:40001..40016`。
+- 免费 `bore.pub` 对同一源 IP 有并发隧道上限；16 条已接近上限。需要更多端口时换自建 `bore server`（`BORE_SERVER`）或分节点。
+- `bore` 二进制默认自动下载到 `/tmp/bore`；离线环境用 `BORE_BIN` 指定已有二进制。
 
-## License
+## 配置项
 
-SPDX-License-Identifier: GPL-3.0-or-later
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `EXTERNAL_HOST` | 自动探测 | 写入清单的公网 IPv4；建议显式填写 |
+| `START_PORT` | `1081` | 首个 SOCKS5 端口；mux 模式请设为 `MUX_PORT+1` 或更高 |
+| `POOL_SIZE` / `INSTANCE_COUNT` | `16` | 实例数（两变量等价，任一设置即可） |
+| `MUX_PORT` | 空 | 管理面/统一入口端口；空=独立端口模式，不启动控制面 |
+| `MUX_LISTEN` | `0.0.0.0` | 管理面监听地址 |
+| `WIREPROXY_BIND_HOST` | `0.0.0.0` | 单个 wireproxy 监听地址；mux 模式建议 `127.0.0.1` |
+| `API_TOKEN` | 空 | `/api/v1/*` 的 Bearer token；空=关闭管理 API |
+| `POOL_PUBLIC_HOST` | 空 | 写进公网清单的主机名；空=自动探测/`EXTERNAL_HOST` |
+| `POOL_PRIVATE_HOST` | 空 | 私网主机名，用于 `scope=private` 清单；空=私网清单 409 |
+| `POOL_ID` | 主机名 | 控制面展示的池 ID |
+| `MIN_HEALTHY` | `14` | 健康检查要求的最小 ok 实例数 |
+| `SOCKS_USER` / `SOCKS_PASS` | `warpuser` / `$SOCKS_PASS` | SOCKS5 账密 |
+| `REROLL_INTERVAL` | `900` | 全量换血周期（秒），对齐网关额度 429 硬冷却（`static_proxy_rate_limit_cooldown_seconds=900`） |
+| `REROLL_BATCH` | `4` | 换血每批实例数 |
+| `DEDUP_RETRIES` | `4` | 单个端口去重最大重试 |
+| `REGISTER_RETRIES` | `3` | 单个账号注册最大尝试 |
+| `WGCF_KEEPALIVE` | `25` | WireGuard PersistentKeepalive |
+| `PROBE_URL` | `https://opencode.ai/cdn-cgi/trace` | 探活地址 |
+| `PROBE_TIMEOUT` | `6` | 探活超时（秒） |
+| `HEALTH_INTERVAL` | `300` | 健康检查周期（秒） |
+| `ENDPOINTS_FILE` | 镜像内 `/usr/local/share/warp-pool/endpoints.txt` | Endpoint 池 |
+| `DENY_48_PREFIXES` | 见 `.env.example` | 禁止出现的 `/48` 家族 |
 
-This project is free software: you may redistribute and modify it under the GNU General Public License as published by the Free Software Foundation, either version 3 or (at your option) any later version. It is distributed without any warranty. See [LICENSE](LICENSE) for the full terms.
+## 管理面与统一入口（可选）
+
+设置 `MUX_PORT` 后，`socksmux` 在同一个端口上按首字节分流：
+
+- 首字节 `0x05` → SOCKS5，客户端用 `warpuser01..NN` 选择后端，密码统一为 `SOCKS_PASS`。
+- 其它 → HTTP 管理面/Web UI。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/healthz` | 免 token；健康实例数 ≥ `MIN_HEALTHY` 返回 200 |
+| `GET` | `/api/v1/status` | 池状态、实例、端口、出口 IP、统计 |
+| `GET` | `/api/v1/endpoints?scope=private\|public` | 端点清单（每行一个 `socks5://`） |
+| `GET` / `PUT` | `/api/v1/config` | 读取/更新可热改参数 |
+| `GET` | `/api/v1/logs?lines=N` | 最近日志 |
+| `POST` | `/api/v1/reroll` | 触发一轮换血 |
+| `POST` | `/api/v1/nodes/{user}/{rotate\|enable\|disable}` | 单节点操作 |
+
+除 `/healthz` 外都需要 `Authorization: Bearer <API_TOKEN>`；Web UI 在 `/`，token 存浏览器 `localStorage`。
+
+InstaCloud 这类只暴露一个端口的平台：设 `MUX_PORT=1081`、`START_PORT=1082`、`WIREPROXY_BIND_HOST=127.0.0.1`，并把服务端口指到 `1081`。`POOL_PRIVATE_HOST` 填平台私网主机名即可让主容器通过 `scope=private` 拉取；公网清单用 `POOL_PUBLIC_HOST`。
+
+主容器侧用仓库根目录的 `pool-sync.sh` 拉取清单并触发热加载；所有地址和 token 都从环境变量/`POOL_ENV_FILE` 读取，不写死。
+
+## 运行机制
+
+### B1 链式注册
+
+- `n01` 使用容器原生网络直连 `wgcf register --accept-tos`。
+- `n02` 起通过 `HTTPS_PROXY=socks5h://warpuser:$SOCKS_PASS@127.0.0.1:LAST_WORKING_PORT` 借道前一个已探活端口的 WARP `/64` 注册。
+- wgcf 原生 uTLS 传输会绕过 `HTTPS_PROXY`，镜像构建时应用 `patches/wgcf-socks5-proxy.patch`：TCP 连接走 SOCKS5，uTLS 握手仍端到端到 Cloudflare。
+- 失败处理：删除损坏的 `wgcf-account.toml`，等待 15 秒重试；链式连续失败后回退直连。
+- 账号保存在 `/data/instances/nXX/`，容器重启复用，不重复注册。
+
+### B2 纯 IPv6 `wireproxy.conf`
+
+由 `wgcf-profile.conf` 渲染，逐项过滤：
+
+- 删除 `172.16.0.2/32`、`1.1.1.1, 1.0.0.1`、`0.0.0.0/0`。
+- `Address` 只保留 IPv6 地址（不依赖原文件顺序）。
+- `DNS` 只保留 IPv6；若过滤后为空，插入 `2606:4700:4700::1111, 2606:4700:4700::1001`。
+- `AllowedIPs` 强制为 `::/0`。
+- `Endpoint` 替换为随机 Anycast `IP:PORT`。
+- 追加带认证的 `[Socks5]` 段（`BindAddress` / `Username` / `Password`）。
+
+### B3 去重与换血
+
+- `endpoints.txt` 提供 32 个组合（8 个 Anycast IP × 4 个端口），启动时同容器内不重复分配。
+  - `162.159.193.1` 已于 2026-11-07 移除：同一已知可用账号对该地址的 4 个端口全部握手失败，其余 8 个地址全部通过。
+- 探活：`curl -x socks5h://... https://opencode.ai/cdn-cgi/trace`，取 `ip=` 前 4 段作为 `/64`。
+- 前缀为空、前缀非 `2a09:`、命中禁区 `/48`、或与其他端口重复 → 更换 Endpoint 并重启该实例，最多 4 次。
+- 4 次换 Endpoint 仍失败且前缀为空/非法（账号级故障）→ 删除账号重新注册一次再复探（`recover_account`）；仅因 `/64` 重复则不再重注册，留给下一轮换血。
+- 每 `900` 秒全量换血（每批 4 个，批间 5 秒），与网关 15 分钟免费层屏蔽窗口对齐。
+- 每 `300` 秒健康检查：探活失败或 `/64` 与其他端口重复先换 Endpoint；仍失败则完整 bring-up（必要时重新注册）。
+
+### B4 接入清单
+
+- 文件：`/data/egress-ext.txt`（每行一个 `socks5://user:pass@HOST:PORT`）。
+- 控制台：首轮去重后打印可直接复制的清单块。
+- 状态：`/data/status.tsv`（端口、PID、Endpoint、`/64`、`loc`、状态、时间戳）。
+
+## 验收（Definition of Done）
+
+1. 节点直连显示目标国家：
+
+   ```bash
+   curl -4 -sS https://www.cloudflare.com/cdn-cgi/trace | grep '^loc='
+   ```
+
+   应为 `JP` / `KR` / `GB` / `AU`，不能是 `SG` / `US` / `DE`。
+
+2. 池规模：
+
+   ```bash
+   docker logs warp-pool-producer 2>&1 | grep 'Active Unique'
+   ```
+
+   输出 `Active Unique /64 Pool Size: 16 / 16`。冷启动需要顺序注册 16 个账号，通常 1–3 分钟；账号已持久化的热启动通常 60 秒内完成。
+
+3. 抽检 IPv6 出口：
+
+   ```bash
+   curl -sS -m 10 --socks5-hostname 'warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1081' \
+     https://opencode.ai/cdn-cgi/trace | grep '^ip='
+   ```
+
+   必须为 `2a09:bac...` 形式的 IPv6。
+
+4. `/48` 不重叠：`--verify` 会打印每个端口的 `/48` 并拒绝禁区家族。
+
+## 跨会话契约 v2（硬性）
+
+- 清单每行严格为 `socks5://USER:PASS@IP:PORT`，**绝不能**带任何 `#` 字符。网关会把含 `#pool` 的条目识别为动态池：不参与失败冷却（`MarkFailure` 直接返回）、每次尝试新建连接、并在池内循环抽取；只有纯静态条目才会进入失败冷却与硬冷却。
+- `export-egress.sh` 写出后强制校验：文件出现 `#`、或有效 `socks5://` 行数不等于 `POOL_SIZE`，立即报错、删除输出并以非零退出。
+- 默认 `POOL_SIZE=16`（端口 `1081~1096`，是 `max_anonymous_exits=8` 的两倍冗余），`REROLL_INTERVAL=900` 秒。
+- **固定端口、出口漂移**：网关清单的 `HOST:PORT` 不变，900s 换血只更换端口后面的 WARP 会话与 `/64`。因此换血**不需要网关重载**，也**不需要跨机定时同步清单**；只有节点公网 IP 或端口段变化时才更新 `proxyfile` 并 Reload。
+- 900s 与网关冷却对齐：
+  - 旧版 `main`：`free_tier_block_seconds` 是零调用死代码；静态条目 429 只走 `failure_cooldown_seconds` 的 15s 指数冷却（15/30/60/120s，上限 8×）。
+  - 新版 `warp-fusion`：`performance.static_proxy_rate_limit_cooldown_seconds = 900` 配合 `limitedUntil`，额度 429 时单端口硬冷却 15 分钟。
+
+## 交给会话 A（双模式）
+
+### 模式 1：旧版 `main` 二进制（WARP 与静态池互斥）
+
+1. `warp.enabled = false`（设为 `true` 时免费模型流量全部走网关内置 WARP，`proxyfile` 被完全绕过）。
+2. `proxyfile` 指向 16 行清单；文件内不得出现任何 `#`。
+3. `performance.max_anonymous_exits = 8`（16 端口 = 2× 冗余）；`performance.failure_cooldown_seconds = 15`。
+4. `free_tier_block_seconds` 可填 `900` 但无效果（死代码），不要依赖它。
+5. 保存/Reload 后生效。
+
+### 模式 2：新版 `warp-fusion` 二进制（双池融合）
+
+1. `warp.enabled = true`；`warp.pool_size = 4`（按机器规格调整）；`warp.stack = "ipv6"`；`warp.direct_fallback = false`。
+2. `anonymous = true`；`proxies = []`；`proxyfile` 指向 16 行清单。
+3. `performance.failure_cooldown_seconds = 15`；`performance.max_anonymous_exits = 0`（使用内置默认 8）；`performance.free_tier_block_seconds = 0`；`performance.static_proxy_rate_limit_cooldown_seconds = 900`。
+4. 保存/Reload 后，融合调度按容量选择顺序：一侧为空则让位；一侧容量 ≥2× 另一侧则优先该侧；否则交替。两池都额度耗尽时返回 `errFreeTierIPBlocked`。
+5. `warp.direct_fallback` 必须为 `false`：否则 WARP 失败会退回直连，绕过双池。
+
+### 两种模式通用
+
+- 将 `egress-ext.txt` 的 16 行写入中心容器 `/var/lib/opencode2api/egress-ext.txt`；文件内不得出现任何 `#` 字符。
+- 中心侧连通性验证：
+
+  ```bash
+  curl -sS -m 10 --socks5-hostname 'warpuser:$SOCKS_PASS@NODE_PUBLIC_IP:1081' \
+    https://opencode.ai/cdn-cgi/trace
+  ```
+
+  期望 `ip=2a09:*`、`loc=JP`（或目标国家）。
+- 防火墙放行中心源 IP：`13.229.234.225`、`18.212.22.159`、`3.79.179.114`。
+- `proxyfile` 只在配置加载/管理端 Reload 时读取（无文件监视）；固定端口设计下换血无需重载。
+
+## 运维
+
+- 状态：`docker exec warp-pool-producer cat /data/status.tsv`。
+- 日志：`docker logs -f --tail=200 warp-pool-producer`。
+- 持久化：named volume `warp-pool-data`；`/data` 内含账号私钥，注意保密。
+- 重启：`docker compose restart`，账号复用，不重新注册。
+- 扩容：同时调整 `INSTANCE_COUNT` 与 `START_PORT`，并确保 `endpoints.txt` 行数不少于实例数。
+- 换节点：新节点冷启动后，把新清单追加给会话 A，并同步防火墙白名单。
+
+## 故障排查
+
+| 现象 | 处理 |
+| --- | --- |
+| `n01` 注册 429 | Cloudflare 同 IP 限速约 10 分钟；等待后 `docker compose restart`，已注册账号会复用 |
+| `register-failed` | 查看 `/data/instances/nXX/register.log` |
+| `generate-failed` | 账号可能损坏；删除该实例 `wgcf-account.toml` 后重启容器 |
+| `bad-prefix` / 非 `2a09:` | 查看 `wireproxy.log`；确认节点出站 UDP 未被封；去重逻辑会自动换 Endpoint |
+| 端口不监听 | `docker exec warp-pool-producer wireproxy -n -c /data/instances/nXX/wireproxy.conf` |
+| 中心连不上 | 检查 `EXTERNAL_HOST`、安全组、`firewall-allow-center.sh` 是否执行 |
+| `permission denied: /data` | 使用 named volume；bind mount 时把目录 `chown` 给容器内 `warp` 用户 |
+| bore 中继掉线 / 端口被占用 | `bore.pub` 对同源 IP 有并发上限；看 `/tmp/bore-<port>.log` 是否 `port already in use`；减少端口或换 `BORE_SERVER`，supervisor 会自动重试 |
+| Docker Desktop 上端口异常 | 本项目要求 Linux 主机 + host 网络 |
+
+## 红线
+
+- 不产生 IPv4 出口：`AllowedIPs` 仅 `::/0`，探活拒绝非 `2a09:` 前缀。
+- 不与 SIN / IAD / FRA 的 `/48` 家族重叠。
+- 不修改 opencode2api 的任何代码。
+- 端口必须同时受 SOCKS5 账密与中心 IP 白名单保护，不要裸奔到公网。
+
+## 已知限制
+
+- WARP 免费额度与 Cloudflare 策略可能变化；账号被限流时需等待或更换节点。
+- 实际落地 Colo 由节点路由决定，以 `cdn-cgi/trace` 的 `loc` 为准。
+- 冷启动受注册限速影响，可能超过 60 秒。
+- SOCKS5 仅承载 TCP；对 HTTP API 足够。
+
+## 本地验证记录
+
+在 Docker 29.9.2 / golang:1.26-alpine / alpine:3.20 上实测：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker build`（打补丁的 wgcf + 固定 commit 的 wireproxy） | 通过，`wireproxy version 1.0.8-dev` |
+| `wgcf register` 直连注册 | 通过，生成 `wgcf-account.toml`（单引号 TOML 已被 `account_valid` 接受） |
+| `render_conf` | `Address` 仅保留 IPv6、`DNS` 仅 IPv6、`AllowedIPs = ::/0`、Endpoint 已替换、追加 `[Socks5]` |
+| 单实例 SOCKS5 探活 | `ip=2a09:bac5:21b3:281e::3ff:c`，/48=`2a09:bac5:21b` |
+| 链式注册（`HTTPS_PROXY=socks5h://...@127.0.0.1:1081`） | 通过，n02 账号有效并可 `generate` |
+| 2 实例 entrypoint | `Active Unique /64 Pool Size: 1 / 2`，`egress-ext.txt` 只写健康端口 |
+| 探活链路 | `ip=2a09:bac5:113:3464::538:79 colo=SYD loc=AU` |
+| 契约 v1.1 清单格式 | 16 行进/出 1081–1096，`#` 行数 0，导出脚本自校验通过 |
+| 契约 v1.1 默认值 | 容器内 `POOL_SIZE=16`、`INSTANCE_COUNT=16`、`REROLL_INTERVAL=900`；清空环境变量回退仍为 16/16/900 |
 

@@ -1,73 +1,84 @@
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+# syntax=docker/dockerfile:1.7
 
-ARG TARGETOS
-ARG TARGETARCH
-ARG VERSION=dev
+ARG GO_IMAGE=golang:1.26-alpine
+ARG RUNTIME_IMAGE=alpine:3.20
+ARG APK_MIRROR_HOST=dl-cdn.alpinelinux.org
 
+FROM ${GO_IMAGE} AS build
+
+ARG WGCF_REPO=https://github.com/ViRb3/wgcf.git
+ARG WGCF_REF=v2.3.1
+ARG WIREPROXY_REPO=https://github.com/windtf/wireproxy.git
+ARG WIREPROXY_REF=35cce290db2f32d5e4316bd54102186f486d0af4
+ARG SING_BOX_VERSION=1.11.15
+ARG SING_BOX_ARCH=amd64
+ARG APK_MIRROR_HOST
+ARG GOPROXY_URL=https://proxy.golang.org,direct
+
+ENV GOPROXY=${GOPROXY_URL}
+
+RUN if [ "${APK_MIRROR_HOST}" != "dl-cdn.alpinelinux.org" ]; then \
+      sed -i "s#dl-cdn.alpinelinux.org#${APK_MIRROR_HOST}#g" /etc/apk/repositories; \
+    fi && \
+    apk add --no-cache git ca-certificates curl tar
 WORKDIR /src
 
-COPY go.mod go.sum ./
-RUN go mod download
+RUN git clone --depth 1 --branch "${WGCF_REF}" "${WGCF_REPO}" wgcf
+COPY patches/wgcf-socks5-proxy.patch /tmp/wgcf-socks5-proxy.patch
+RUN mkdir -p /out && cd wgcf && git apply --verbose /tmp/wgcf-socks5-proxy.patch && \
+    CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /out/wgcf .
 
-COPY . .
+RUN mkdir -p /out && git clone "${WIREPROXY_REPO}" wireproxy && \
+    cd wireproxy && git checkout "${WIREPROXY_REF}" && \
+    CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /out/wireproxy ./cmd/wireproxy
 
-RUN CGO_ENABLED=0 \
-    GOOS="${TARGETOS:-linux}" \
-    GOARCH="${TARGETARCH:-amd64}" \
-    go build \
-      -trimpath \
-      -ldflags="-s -w -X main.version=${VERSION}" \
-      -o /out/opencode2api ./cmd/opencode2api
+COPY socksmux /src/socksmux
+RUN cd /src/socksmux && CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /out/socksmux .
 
-FROM alpine:3.22
+RUN curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-linux-${SING_BOX_ARCH}.tar.gz" -o /tmp/sing-box.tar.gz && \
+    tar -xzf /tmp/sing-box.tar.gz -C /tmp && \
+    cp "/tmp/sing-box-${SING_BOX_VERSION}-linux-${SING_BOX_ARCH}/sing-box" /out/sing-box && \
+    chmod 0755 /out/sing-box
 
-ARG TARGETARCH=amd64
-ARG MIHOMO_VERSION=v1.19.33
+FROM ${RUNTIME_IMAGE}
 
-RUN apk add --no-cache ca-certificates su-exec tzdata jq yq-go curl \
-    && case "${TARGETARCH}" in \
-         arm64) mihomo_arch=arm64 ;; \
-         *)     mihomo_arch=amd64-compatible ;; \
-       esac \
-    && { wget -qO /tmp/mihomo.gz \
-         "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-${mihomo_arch}-${MIHOMO_VERSION}.gz" \
-         || wget -qO /tmp/mihomo.gz \
-         "https://gh-proxy.com/https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-${mihomo_arch}-${MIHOMO_VERSION}.gz"; } \
-    && gunzip -c /tmp/mihomo.gz > /usr/local/bin/mihomo \
-    && chmod 0755 /usr/local/bin/mihomo \
-    && rm -f /tmp/mihomo.gz \
-    && addgroup -S opencode2api \
-    && adduser -S -G opencode2api -h /var/lib/opencode2api opencode2api \
-    && mkdir -p /app /var/lib/opencode2api \
-    && chown -R opencode2api:opencode2api /app /var/lib/opencode2api
+ARG APK_MIRROR_HOST
 
-COPY --from=builder /out/opencode2api /usr/local/bin/opencode2api-app
-COPY --chmod=0755 opencode2api-wrapper.sh /usr/local/bin/opencode2api
-COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
-COPY --chmod=0755 pool-sync.sh /usr/local/bin/pool-sync.sh
-COPY --chmod=0755 boot.sh /usr/local/bin/boot.sh
-COPY --chmod=0755 proxyctl /usr/local/bin/proxyctl
-COPY --chown=opencode2api:opencode2api config.example.json /app/config.example.json
-COPY LICENSE /usr/share/licenses/opencode2api/LICENSE
-LABEL org.opencontainers.image.licenses="GPL-3.0-or-later"
+RUN if [ "${APK_MIRROR_HOST}" != "dl-cdn.alpinelinux.org" ]; then \
+      sed -i "s#dl-cdn.alpinelinux.org#${APK_MIRROR_HOST}#g" /etc/apk/repositories; \
+    fi && \
+    apk add --no-cache bash curl ca-certificates tzdata jq && \
+    addgroup -S warp && adduser -S -G warp -h /data warp && \
+    mkdir -p /data/instances /usr/local/share/warp-pool && \
+    chown -R warp:warp /data
 
-# LISTEN_ADDRESS / WEBUI_LISTEN_ADDRESS are intentionally unset: config.json is
-# authoritative. Export them to override the configured listen addresses.
-ENV CONFIG_PATH=/var/lib/opencode2api/config.json \
-    CONFIG_SEED_PATH= \
-    LISTEN_ADDRESS= \
-    WEBUI_LISTEN_ADDRESS= \
-    STATE_DIR=/var/lib/opencode2api \
-    O2A_BIN=/usr/local/bin/opencode2api-app \
-    POOL_SYNC_BIN=/usr/local/bin/pool-sync.sh
+COPY --from=build /out/wgcf /usr/local/bin/wgcf
+COPY --from=build /out/wireproxy /usr/local/bin/wireproxy
+COPY --from=build /out/socksmux /usr/local/bin/socksmux
+COPY --from=build /out/sing-box /usr/local/bin/sing-box
+COPY endpoints.txt /usr/local/share/warp-pool/endpoints.txt
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY relay-entrypoint.sh /usr/local/bin/relay-entrypoint.sh
+COPY relay-watchdog.sh /usr/local/bin/relay-watchdog.sh
+COPY healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/relay-entrypoint.sh /usr/local/bin/relay-watchdog.sh /usr/local/bin/healthcheck.sh
 
-WORKDIR /app
+ENV STATE_DIR=/data \
+    START_PORT=1081 \
+    POOL_SIZE=16 \
+    INSTANCE_COUNT=16 \
+    REROLL_INTERVAL=900 \
+    REROLL_BATCH=4 \
+    DEDUP_RETRIES=4 \
+    PROBE_URL=https://opencode.ai/cdn-cgi/trace \
+    PROBE_TIMEOUT=6 \
+    HEALTH_INTERVAL=300
 
-EXPOSE 8080 8081
+USER warp
+VOLUME ["/data"]
+EXPOSE 1081-1096
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz \
-        || wget -q -O /dev/null http://127.0.0.1:8081/healthz \
-        || exit 1
+HEALTHCHECK --interval=60s --timeout=15s --start-period=180s --retries=3 \
+  CMD ["/usr/local/bin/healthcheck.sh"]
 
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
