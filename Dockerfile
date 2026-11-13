@@ -1,73 +1,48 @@
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+# syntax=docker/dockerfile:1.7
+# Xray VLESS + WebSocket node with a small Node.js front door.
+#
+# One image covers every node-* service:
+#   node-us / node-eu / node-sg   PORT=8443 (volume optional)
+#   node-sg-ws                    PORT=8080, volume /data
+#
+# The front door terminates plain HTTP/WS; TLS is provided by the platform
+# ingress (the generated vless:// link therefore advertises :443 + security=tls).
 
-ARG TARGETOS
-ARG TARGETARCH
-ARG VERSION=dev
+ARG NODE_IMAGE=node:22-alpine
+FROM ${NODE_IMAGE}
 
-WORKDIR /src
-
-COPY go.mod go.sum ./
-RUN go mod download
-
-COPY . .
-
-RUN CGO_ENABLED=0 \
-    GOOS="${TARGETOS:-linux}" \
-    GOARCH="${TARGETARCH:-amd64}" \
-    go build \
-      -trimpath \
-      -ldflags="-s -w -X main.version=${VERSION}" \
-      -o /out/opencode2api ./cmd/opencode2api
-
-FROM alpine:3.22
-
+ARG XRAY_VERSION=v26.11.9
 ARG TARGETARCH=amd64
-ARG MIHOMO_VERSION=v1.19.33
 
-RUN apk add --no-cache ca-certificates su-exec tzdata jq yq-go curl \
-    && case "${TARGETARCH}" in \
-         arm64) mihomo_arch=arm64 ;; \
-         *)     mihomo_arch=amd64-compatible ;; \
-       esac \
-    && { wget -qO /tmp/mihomo.gz \
-         "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-${mihomo_arch}-${MIHOMO_VERSION}.gz" \
-         || wget -qO /tmp/mihomo.gz \
-         "https://gh-proxy.com/https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-${mihomo_arch}-${MIHOMO_VERSION}.gz"; } \
-    && gunzip -c /tmp/mihomo.gz > /usr/local/bin/mihomo \
-    && chmod 0755 /usr/local/bin/mihomo \
-    && rm -f /tmp/mihomo.gz \
-    && addgroup -S opencode2api \
-    && adduser -S -G opencode2api -h /var/lib/opencode2api opencode2api \
-    && mkdir -p /app /var/lib/opencode2api \
-    && chown -R opencode2api:opencode2api /app /var/lib/opencode2api
-
-COPY --from=builder /out/opencode2api /usr/local/bin/opencode2api-app
-COPY --chmod=0755 opencode2api-wrapper.sh /usr/local/bin/opencode2api
-COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
-COPY --chmod=0755 pool-sync.sh /usr/local/bin/pool-sync.sh
-COPY --chmod=0755 boot.sh /usr/local/bin/boot.sh
-COPY --chmod=0755 proxyctl /usr/local/bin/proxyctl
-COPY --chown=opencode2api:opencode2api config.example.json /app/config.example.json
-COPY LICENSE /usr/share/licenses/opencode2api/LICENSE
-LABEL org.opencontainers.image.licenses="GPL-3.0-or-later"
-
-# LISTEN_ADDRESS / WEBUI_LISTEN_ADDRESS are intentionally unset: config.json is
-# authoritative. Export them to override the configured listen addresses.
-ENV CONFIG_PATH=/var/lib/opencode2api/config.json \
-    CONFIG_SEED_PATH= \
-    LISTEN_ADDRESS= \
-    WEBUI_LISTEN_ADDRESS= \
-    STATE_DIR=/var/lib/opencode2api \
-    O2A_BIN=/usr/local/bin/opencode2api-app \
-    POOL_SYNC_BIN=/usr/local/bin/pool-sync.sh
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) xray_arch=64 ;; \
+      arm64) xray_arch=arm64-v8a ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    apk add --no-cache ca-certificates curl unzip tzdata; \
+    curl -fsSL --retry 3 -o /tmp/xray.zip \
+      "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${xray_arch}.zip"; \
+    unzip -q /tmp/xray.zip -d /usr/local/bin xray; \
+    chmod +x /usr/local/bin/xray; \
+    rm -f /tmp/xray.zip; \
+    mkdir -p /app /data; \
+    xray version | head -n 2
 
 WORKDIR /app
+COPY package.json server.js index.html ./
 
-EXPOSE 8080 8081
+ENV PORT=8080 \
+    XRAY_PORT=8081 \
+    WS_PATH=/proxy \
+    STATE_DIR=/data \
+    PUBLIC_PORT=443 \
+    PUBLIC_TLS=1
+
+EXPOSE 8080 8443
+VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz \
-        || wget -q -O /dev/null http://127.0.0.1:8081/healthz \
-        || exit 1
+  CMD wget -qO- "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1 || exit 1
 
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]
+CMD ["node", "server.js"]
