@@ -1,0 +1,4 @@
+projects/
+.env
+data/
+*.bak-*

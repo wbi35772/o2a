@@ -1,0 +1,21 @@
+name: stack-contract
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: sync.sh syntax
+        run: sh -n stack/sync.sh
+      - name: project list shape
+        run: |
+          test -s stack/projects.tsv
+          awk -F'\t' 'NF && $1 !~ /^#/ && NF != 3 { exit 1 }' stack/projects.tsv
+      - name: compose file present
+        run: test -s stack/compose.yml
