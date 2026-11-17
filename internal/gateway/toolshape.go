@@ -87,6 +87,40 @@ func officialToolNames(v1 bool) []string {
 	return v2OfficialToolOrder
 }
 
+// OfficialToolCandidates returns client tool names equivalent to an official name.
+func OfficialToolCandidates(officialName string) []string {
+	switch strings.ToLower(officialName) {
+	case "bash", "shell":
+		return []string{"Bash"}
+	case "edit":
+		return []string{"Edit"}
+	case "glob":
+		return []string{"Glob"}
+	case "grep":
+		return []string{"Grep"}
+	case "question":
+		return []string{"AskUserQuestion"}
+	case "read":
+		return []string{"Read"}
+	case "skill":
+		return []string{"Skill"}
+	case "subagent", "task":
+		return []string{"Agent", "Task", "Subagent"}
+	case "todowrite":
+		return []string{"TodoWrite"}
+	case "webfetch":
+		return []string{"WebFetch"}
+	case "websearch":
+		return []string{"WebSearch"}
+	case "write":
+		return []string{"Write"}
+	case "patch":
+		return []string{"Patch"}
+	default:
+		return nil
+	}
+}
+
 // officialToolDefinition returns the captured definition for an official name.
 func officialToolDefinition(name string, v1 bool) (opencodeToolDefinition, bool) {
 	loadOfficialTools()
@@ -191,8 +225,26 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			items = list
 		}
 	}
+	declaredNames := make([]string, 0, len(items))
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, ok := renamableToolName(protocol, entry); ok {
+			declaredNames = append(declaredNames, name)
+		}
+	}
 	if protocol == wire.Chat || protocol == wire.Responses {
 		if legacy, ok := payload["functions"].([]any); ok {
+			for _, rawEntry := range legacy {
+				entry, ok := rawEntry.(map[string]any)
+				if ok {
+					if name := jsonutil.StringAt(entry, "name"); name != "" {
+						declaredNames = append(declaredNames, name)
+					}
+				}
+			}
 			items = append(items, convertLegacyFunctions(legacy, protocol, renames, used)...)
 			delete(payload, "functions")
 		}
@@ -216,8 +268,29 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 	}
 	shaped = append(shaped, officialToolset(protocol, v1)...)
 	payload["tools"] = shaped
+	bindOfficialToolAliases(renames, declaredNames, officialToolNames(v1))
 	rewriteToolReferences(payload, protocol, renames)
 	return renames, true
+}
+
+func bindOfficialToolAliases(renames *wire.ToolRenames, declaredNames, officialNames []string) {
+	for _, official := range officialNames {
+		candidates := OfficialToolCandidates(official)
+		for _, declared := range declaredNames {
+			if _, exists := renames.Wire(declared); !exists {
+				continue
+			}
+			for _, candidate := range candidates {
+				if match, _ := renames.Resolve(candidate); match == declared {
+					renames.BindOfficial(official, declared)
+					break
+				}
+			}
+			if _, exists := renames.Official(official); exists {
+				break
+			}
+		}
+	}
 }
 
 // renamableToolName returns the client tool name of one definition. Responses
