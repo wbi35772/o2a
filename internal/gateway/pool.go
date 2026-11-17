@@ -612,6 +612,34 @@ func (p *anonymousNodes) clearModelLimited(node *anonymousNode, model string) {
 	delete(node.modelLimited, model)
 }
 
+// ClearModelLimited drops every node’s hold for model, e.g. after an egress
+// reroll gives the proxies fresh addresses: a hold recorded against the old
+// address must not keep the fresh address out of the model’s cursor. An
+// empty model clears every model’s hold on every node. It returns how many
+// holds were dropped. Unlike RestoreProxy it is not tied to a proxy
+// recovering connectivity, because a reroll never makes a proxy unhealthy.
+func (p *anonymousNodes) ClearModelLimited(model string) int {
+	if p == nil {
+		return 0
+	}
+	cleared := 0
+	for _, node := range p.nodes {
+		if node == nil {
+			continue
+		}
+		node.modelMu.Lock()
+		if model == "" {
+			cleared += len(node.modelLimited)
+			node.modelLimited = nil
+		} else if _, ok := node.modelLimited[model]; ok {
+			delete(node.modelLimited, model)
+			cleared++
+		}
+		node.modelMu.Unlock()
+	}
+	return cleared
+}
+
 // HasExternal reports whether the anonymous pool holds any real proxy exit
 // beyond the host address. It separates a configured proxyfile pool (fusion
 // candidate) from the implicit ["direct"] route.

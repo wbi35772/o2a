@@ -184,7 +184,35 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", g.authenticate(g.handleInference(wire.Anthropic)))
 	mux.HandleFunc("POST /v1/systemone", g.authenticate(g.handleSystemOne))
 	mux.HandleFunc("GET /healthz", g.handleHealth)
+	mux.HandleFunc("POST /admin/prescreen/clear", g.authenticate(g.handlePrescreenClear))
 	return telemetry.Recover(g.logger, mux)
+}
+
+// handlePrescreenClear drops the per-model prescreen holds on the anonymous
+// lane, so exits whose egress address changed (an external reroll) become
+// drawable for the model again. It takes an optional JSON body
+// {"model": "<model-id>"}; an empty body or an empty model clears every
+// model's hold. It answers {"cleared": <holds dropped>, "model": "<model>"}.
+// It is authenticated like the /v1 routes (server key), because the API port
+// is also reachable through the public tunnel: a loopback check alone would
+// not distinguish a local caller from a tunnelled one.
+func (g *Gateway) handlePrescreenClear(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model string `json:"model"`
+	}
+	if r.Body != nil {
+		defer r.Body.Close()
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			httpx.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+	}
+	cleared := 0
+	if g.anonymous != nil {
+		cleared = g.anonymous.ClearModelLimited(req.Model)
+	}
+	g.logger.Info("prescreen holds cleared", "component", "prescreen", "event", "prescreen_cleared", "model", req.Model, "cleared", cleared)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"cleared": cleared, "model": req.Model})
 }
 
 // authenticate admits a request whose x-api-key header or Bearer token

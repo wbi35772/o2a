@@ -156,6 +156,43 @@ func TestPrescreenModelLimitClears(t *testing.T) {
 	}
 }
 
+// ClearModelLimited drops every node's hold for one model (a reroll gave the
+// proxies fresh addresses, so the old holds must not keep them out), and
+// clears all models when the model is empty. Other models' holds are kept.
+func TestClearModelLimited(t *testing.T) {
+	a := testStaticNode("socks5://127.0.0.1:21000")
+	b := testStaticNode("socks5://127.0.0.1:21001")
+	pool := testPool(a, b)
+	now := time.Now()
+
+	pool.MarkModelLimited(a, "deepseek-v4.1-flash-free", now.Add(time.Hour))
+	pool.MarkModelLimited(b, "deepseek-v4.1-flash-free", now.Add(time.Hour))
+	pool.MarkModelLimited(a, "beam-free", now.Add(time.Hour))
+
+	// A deepseek-only clear drops both deepseek holds and keeps beam's.
+	if got := pool.ClearModelLimited("deepseek-v4.1-flash-free"); got != 2 {
+		t.Fatalf("ClearModelLimited(deepseek) = %d, want 2", got)
+	}
+	deepseekCursor := pool.CursorForModel("s", "deepseek-v4.1-flash-free")
+	if got := deepseekCursor.Next(); got == nil {
+		t.Fatal("deepseek cursor after clear returned nil, want a node")
+	}
+	// Beam is still held on a; b was never held for beam, so it draws b.
+	beamCursor := pool.CursorForModel("s", "beam-free")
+	if got := beamCursor.Next(); got != b {
+		t.Fatalf("beam cursor after deepseek-only clear = %v, want b (a still held for beam)", got)
+	}
+
+	// Clear-all drops the remaining beam hold on a.
+	if got := pool.ClearModelLimited(""); got != 1 {
+		t.Fatalf("ClearModelLimited(\"\") = %d, want 1 (only beam's hold left)", got)
+	}
+	beamCursor = pool.CursorForModel("s", "beam-free")
+	if got := beamCursor.Next(); got == nil {
+		t.Fatal("beam cursor after clear-all returned nil, want a node")
+	}
+}
+
 // A per-model hold is a no-op for #pool nodes (the listener draws a fresh
 // egress per connection, so it is never spent) and for an empty model.
 func TestPrescreenModelLimitedIgnoresPoolNodes(t *testing.T) {
