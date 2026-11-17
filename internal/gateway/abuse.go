@@ -65,6 +65,36 @@ func (g *Gateway) freeUsageBlockTTL(retryAfter string) time.Duration {
 	return g.freeTierBlockTTL()
 }
 
+// prescreenBlockTTL is the hold applied to a prescreened model's exit after a
+// FreeUsageLimitError. It honors the upstream Retry-After (capped at a day);
+// without one it holds until the next UTC midnight, when the daily quota
+// resets. Unlike freeUsageBlockTTL it never falls back to the 15-minute abuse
+// window: a missing header must not return a spent exit to the model within
+// the same quota day.
+func prescreenBlockTTL(retryAfter string) time.Duration {
+	if d := parseRetryAfter(retryAfter); d > 0 {
+		return min(d, maxFreeUsageBlockTTL)
+	}
+	now := time.Now().UTC()
+	next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
+	return time.Until(next)
+}
+
+// prescreenModel reports whether model is on the per-model prescreen list
+// (performance.prescreen_models): its 429 holds an exit out for that model
+// only, while other models keep using it.
+func (g *Gateway) prescreenModel(model string) bool {
+	if g == nil || model == "" {
+		return false
+	}
+	for _, m := range g.cfg.Performance.PrescreenModels {
+		if m == model {
+			return true
+		}
+	}
+	return false
+}
+
 // abuseProbeLimit bounds how much of a 403 body is read to classify it.
 const abuseProbeLimit = 16 << 10
 

@@ -152,6 +152,11 @@ type anonymousNode struct {
 	failures      atomic.Uint32
 	cooldownUntil atomic.Int64 // soft: transport failures, still a last resort
 	limitedUntil  atomic.Int64 // hard: HTTP 429, never drawn until it expires
+	// modelMu guards modelLimited: per-model hard holds for prescreened
+	// models (see MarkModelLimited). A model-scoped hold keeps the exit out
+	// of that model's cursor only; other models keep using it.
+	modelMu      sync.Mutex
+	modelLimited map[string]int64 // model ID -> limitedUntil UnixNano
 }
 
 // anonymousCursor walks the anonymous nodes for one request from start;
@@ -159,6 +164,7 @@ type anonymousNode struct {
 // first pass or the fallback of Next has already returned.
 type anonymousCursor struct {
 	pool   *anonymousNodes
+	model  string // prescreened model this cursor serves; "" disables per-model screening
 	start  int
 	offset int
 	used   []bool
@@ -212,8 +218,16 @@ func (p *anonymousNodes) HasPool() bool {
 // affinity key, keeping a conversation on one exit; an empty affinity rotates
 // the starting node round-robin.
 func (p *anonymousNodes) CursorFor(affinity string) anonymousCursor {
+	return p.CursorForModel(affinity, "")
+}
+
+// CursorForModel returns a cursor like CursorFor, but its per-model holds
+// apply to model: exits a prescreened model burned stay out of this cursor
+// only, while other models keep drawing them. An empty model disables
+// per-model screening.
+func (p *anonymousNodes) CursorForModel(affinity, model string) anonymousCursor {
 	if p == nil || len(p.nodes) == 0 {
-		return anonymousCursor{pool: p}
+		return anonymousCursor{pool: p, model: model}
 	}
 	start := 0
 	if affinity == "" {
@@ -223,7 +237,7 @@ func (p *anonymousNodes) CursorFor(affinity string) anonymousCursor {
 		_, _ = hash.Write([]byte(affinity))
 		start = int(hash.Sum64() % uint64(len(p.nodes)))
 	}
-	return anonymousCursor{pool: p, start: start}
+	return anonymousCursor{pool: p, model: model, start: start}
 }
 
 // AllowAttempt reports whether an anonymous attempt may run. An open breaker
@@ -390,7 +404,12 @@ func (c *anonymousCursor) Next() *anonymousNode {
 		return node.proxy != nil && node.proxy.blockedUntil.Load() > now
 	}
 	isLimited := func(node *anonymousNode) bool {
-		return node.limitedUntil.Load() > now
+		if node.limitedUntil.Load() > now {
+			return true
+		}
+		// A prescreened model's hold is per-model: the exit stays out of
+		// this model's cursor only, while other models keep drawing it.
+		return c.model != "" && c.pool.modelLimited(node, c.model, time.Unix(0, now))
 	}
 	for c.offset < n {
 		idx := (c.start + c.offset) % n
@@ -546,6 +565,51 @@ func (p *anonymousNodes) MarkFailure(node *anonymousNode, resp *http.Response, e
 		}
 	}
 	node.cooldownUntil.Store(now.Add(delay).UnixNano())
+}
+
+// MarkModelLimited holds node out of model’s cursor until until, for a
+// prescreened model whose free allowance is spent on this exit. Unlike the
+// global limitedUntil, other models keep drawing the exit: a deepseek quota
+// hit must not take the exit away from beam. It is a no-op for #pool nodes
+// (a pool draw binds a fresh egress per connection, so the listener itself
+// is never spent) and for an empty model.
+func (p *anonymousNodes) MarkModelLimited(node *anonymousNode, model string, until time.Time) {
+	if node == nil || node.proxy == nil || node.proxy.pool || model == "" {
+		return
+	}
+	node.modelMu.Lock()
+	if node.modelLimited == nil {
+		node.modelLimited = make(map[string]int64)
+	}
+	node.modelLimited[model] = until.UnixNano()
+	node.modelMu.Unlock()
+}
+
+// modelLimited reports whether node is held out of model’s cursor at now.
+func (p *anonymousNodes) modelLimited(node *anonymousNode, model string, now time.Time) bool {
+	if node == nil || model == "" {
+		return false
+	}
+	node.modelMu.Lock()
+	defer node.modelMu.Unlock()
+	until, ok := node.modelLimited[model]
+	return ok && until > now.UnixNano()
+}
+
+// clearModelLimited drops model’s hold on node, e.g. after a success proves
+// the exit has quota for that model again. An empty model clears every
+// model’s hold.
+func (p *anonymousNodes) clearModelLimited(node *anonymousNode, model string) {
+	if node == nil {
+		return
+	}
+	node.modelMu.Lock()
+	defer node.modelMu.Unlock()
+	if model == "" {
+		node.modelLimited = nil
+		return
+	}
+	delete(node.modelLimited, model)
 }
 
 // HasExternal reports whether the anonymous pool holds any real proxy exit

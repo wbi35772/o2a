@@ -289,6 +289,12 @@ type PerformanceConfig struct {
 	// transient rate limit may shorten it through its Retry-After. Zero uses
 	// the built-in 15 minutes, aligned with a 20-minute /64 rotation.
 	StaticProxyRateLimitCooldownSeconds int `json:"static_proxy_rate_limit_cooldown_seconds"`
+	// PrescreenModels lists the free models whose 429 (FreeUsageLimitError)
+	// holds an exit out for that model only, until the quota recovers. Other
+	// models keep using the exit. Add or replace models by editing this list
+	// and restarting the gateway; no code change is needed. Empty disables
+	// per-model prescreening.
+	PrescreenModels []string `json:"prescreen_models,omitempty"`
 }
 
 // AttemptTimeout returns the bound for a single upstream attempt. When

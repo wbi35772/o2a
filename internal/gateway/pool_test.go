@@ -108,3 +108,86 @@ func TestAvailableExitsCountsDrawableStaticNodes(t *testing.T) {
 		t.Fatal("HasExternal = true for a direct-only pool")
 	}
 }
+
+// A per-model hold keeps the exit out of that model's cursor only: beam
+// still draws it while deepseek skips it, and a cursor with no model is
+// unaffected.
+func TestPrescreenModelLimitedSkipsOnlyThatModel(t *testing.T) {
+	burned := testStaticNode("socks5://127.0.0.1:21000")
+	live := testStaticNode("socks5://127.0.0.1:21001")
+	pool := testPool(burned, live)
+	now := time.Now()
+
+	pool.MarkModelLimited(burned, "deepseek-v4.1-flash-free", now.Add(time.Hour))
+
+	deepseekCursor := pool.CursorForModel("s", "deepseek-v4.1-flash-free")
+	if got := deepseekCursor.Next(); got != live {
+		t.Fatalf("deepseek cursor = %v, want the live node only", got)
+	}
+	beamCursor := pool.CursorForModel("s", "beam-free")
+	if got := beamCursor.Next(); got == nil {
+		t.Fatal("beam cursor returned nil, want a node (per-model hold must not block other models)")
+	}
+	plainCursor := pool.CursorFor("s")
+	if got := plainCursor.Next(); got == nil {
+		t.Fatal("model-less cursor returned nil, want a node")
+	}
+	if got := pool.AvailableExits(now); got != 2 {
+		t.Fatalf("AvailableExits = %d, want 2 (per-model holds do not change the global count)", got)
+	}
+}
+
+// A per-model hold expires on its own: once it is cleared (the way a success
+// for that model clears it), the model draws the exit again.
+func TestPrescreenModelLimitClears(t *testing.T) {
+	node := testStaticNode("socks5://127.0.0.1:21000")
+	pool := testPool(node)
+	now := time.Now()
+
+	pool.MarkModelLimited(node, "deepseek-v4.1-flash-free", now.Add(time.Hour))
+	heldCursor := pool.CursorForModel("s", "deepseek-v4.1-flash-free")
+	if got := heldCursor.Next(); got != nil {
+		t.Fatalf("deepseek cursor returned a node while held, want nil")
+	}
+	pool.clearModelLimited(node, "deepseek-v4.1-flash-free")
+	freedCursor := pool.CursorForModel("s", "deepseek-v4.1-flash-free")
+	if got := freedCursor.Next(); got != node {
+		t.Fatalf("deepseek cursor after clear = %v, want the node", got)
+	}
+}
+
+// A per-model hold is a no-op for #pool nodes (the listener draws a fresh
+// egress per connection, so it is never spent) and for an empty model.
+func TestPrescreenModelLimitedIgnoresPoolNodes(t *testing.T) {
+	pooled := &proxyTransport{name: "socks5://127.0.0.1:21002", pool: true}
+	pooled.healthy.Store(true)
+	pool := testPool(&anonymousNode{proxy: pooled})
+	now := time.Now()
+
+	pool.MarkModelLimited(pool.nodes[0], "deepseek-v4.1-flash-free", now.Add(time.Hour))
+	poolCursor := pool.CursorForModel("s", "deepseek-v4.1-flash-free")
+	if got := poolCursor.Next(); got == nil {
+		t.Fatal("deepseek cursor returned nil for a #pool node, want the node (pool nodes are never held)")
+	}
+}
+
+// prescreenBlockTTL honors a Retry-After (capped at a day); without one it
+// holds until the next UTC midnight, when the daily quota resets.
+func TestPrescreenBlockTTL(t *testing.T) {
+	if got := prescreenBlockTTL("3600"); got < 59*time.Minute || got > 61*time.Minute {
+		t.Fatalf("prescreenBlockTTL(3600) = %v, want ~1h", got)
+	}
+	if got := prescreenBlockTTL("999999"); got > 24*time.Hour {
+		t.Fatalf("prescreenBlockTTL(999999) = %v, want at most 24h", got)
+	}
+	before := time.Now().UTC()
+	got := prescreenBlockTTL("")
+	next := time.Date(before.Year(), before.Month(), before.Day()+1, 0, 0, 0, 0, time.UTC)
+	want := time.Until(next)
+	if got < want-2*time.Second || got > want+2*time.Second {
+		t.Fatalf("prescreenBlockTTL(\"\") = %v, want ~%v (until next UTC midnight)", got, want)
+	}
+	if got <= 0 || got > 24*time.Hour {
+		t.Fatalf("prescreenBlockTTL(\"\") = %v, want (0, 24h]", got)
+	}
+}

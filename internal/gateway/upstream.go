@@ -393,7 +393,7 @@ func (g *Gateway) doStaticAnonymousUpstream(ctx context.Context, route models.Ro
 	// then reports errDeterministicClientRejection so the caller keeps this
 	// 4xx instead of replacing it with a later tier's answer.
 	halted := false
-	cursor := g.anonymous.CursorFor(ids.Session)
+	cursor := g.anonymous.CursorForModel(ids.Session, route.ID)
 	limit := min(g.anonymous.Len(), g.maxAnonymousExits())
 	if g.anonymous.HasPool() && g.cfg.Retry.MaxAttempts > limit {
 		limit = g.cfg.Retry.MaxAttempts
@@ -492,6 +492,10 @@ func (g *Gateway) doStaticAnonymousUpstream(ctx context.Context, route models.Ro
 			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
 			if err == nil && resp.StatusCode/100 == 2 {
 				g.observeAnonymousResult(ctx, node, resp, nil)
+				// A success proves this exit has quota for this model again:
+				// drop its per-model hold so a rerolled egress is usable at
+				// once instead of waiting out the prescreen window.
+				g.anonymous.clearModelLimited(node, route.ID)
 				g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 				return resp, nil, attempts
 			}
@@ -516,8 +520,15 @@ func (g *Gateway) doStaticAnonymousUpstream(ctx context.Context, route models.Ro
 					node.proxy.noteQuotaHit()
 					// A static exit (no #pool) cannot draw a fresh egress, so
 					// hold it out of rotation for the full rate-limit window.
-					// The call is a no-op for #pool nodes.
-					g.anonymous.MarkFailure(node, resp, nil)
+					// The call is a no-op for #pool nodes. A prescreened
+					// model instead takes a per-model hold (see
+					// MarkModelLimited): the exit stays out of that model's
+					// cursor only, while other models keep using it.
+					if g.prescreenModel(route.ID) {
+						g.anonymous.MarkModelLimited(node, route.ID, time.Now().Add(prescreenBlockTTL(resp.Header.Get("Retry-After"))))
+					} else {
+						g.anonymous.MarkFailure(node, resp, nil)
+					}
 					lastErr = errFreeTierIPBlocked
 					blocked = true
 					deferred = true
